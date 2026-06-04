@@ -1,0 +1,78 @@
+{
+  "name": "vscode-cc-statistics",
+  "displayName": "Claude Code Statistics Panel",
+  "description": "Claude Code 实时统计面板 — Token 消耗、缓存命中率、费用追踪，支持 DeepSeek 平台余额",
+  "version": "1.0.0",
+  "icon": "media/icon.png",
+  "publisher": "local",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/local/vscode-cc-statistics"
+  },
+  "bugs": {
+    "url": "https://github.com/local/vscode-cc-statistics/issues"
+  },
+  "homepage": "https://github.com/local/vscode-cc-statistics#readme",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "token",
+    "cost",
+    "deepseek",
+    "pomodoro"
+  ],
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:vscode-cc-statistics.panel"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "vscode-cc-statistics-container",
+          "title": "Claude Code Statistics Panel",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "vscode-cc-statistics-container": [
+        {
+          "type": "webview",
+          "id": "vscode-cc-statistics.panel",
+          "name": ""
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "vscode-cc-statistics.refresh",
+        "title": "刷新数据",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "vscode-cc-statistics.openPanel",
+        "title": "打开 CC 侧边面板"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "tsc -p ./",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "^3.9.1",
+    "typescript": "^5.4.0"
+  }
+}
