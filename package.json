@@ -20,7 +20,8 @@
     "token",
     "cost",
     "deepseek",
-    "pomodoro"
+    "api-key",
+    "balance"
   ],
   "engines": {
     "vscode": "^1.80.0"
