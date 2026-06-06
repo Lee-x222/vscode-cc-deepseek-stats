@@ -60,6 +60,10 @@
       {
         "command": "vscode-cc-statistics.openPanel",
         "title": "打开 CC 侧边面板"
+      },
+      {
+        "command": "vscode-cc-statistics.exportCSV",
+        "title": "导出 CSV 消耗明细"
       }
     ]
   },

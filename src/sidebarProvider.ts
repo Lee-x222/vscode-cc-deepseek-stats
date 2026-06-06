@@ -30,8 +30,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     // 接受来自 WebView 的消息（如手动刷新）
     webviewView.onDidDispose(() => {
-      this._cancelRefresh?.();
-      this._view = undefined;
+      // 身份校验：只有被销毁的 view 仍是当前 view 时才清理
+      if (this._view === webviewView) {
+        this._cancelRefresh?.();
+        this._view = undefined;
+      }
     });
 
     webviewView.webview.onDidReceiveMessage((msg) => {
@@ -78,14 +81,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         } catch {
           webviewView.webview.postMessage({ type: 'authData', data: {} });
         }
+      } else if (msg.command === 'exportCSV') {
+        vscode.commands.executeCommand('vscode-cc-statistics.exportCSV');
+      } else if (msg.command === 'openUrl') {
+        vscode.env.openExternal(vscode.Uri.parse(msg.url));
       } else if (msg.command === 'saveAuth') {
         const authPath = path.join(os.homedir(), '.claude', 'deepseek_auth.json');
         try {
           let auth: any = {};
           try { auth = JSON.parse(fs.readFileSync(authPath, 'utf-8')); } catch {}
-          auth.token = msg.token || '';
-          auth.userAgent = msg.userAgent || '';
-          auth.cookie = msg.cookie || '';
+          if (msg.apiKey !== undefined) auth.apiKey = msg.apiKey;
+          if (typeof msg.balanceThreshold === 'number' && msg.balanceThreshold > 0) {
+            auth.balanceThreshold = msg.balanceThreshold;
+          }
           fs.writeFileSync(authPath, JSON.stringify(auth, null, 2));
           webviewView.webview.postMessage({ type: 'authSaved', ok: true });
         } catch (e: any) {
@@ -98,7 +106,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     this._cancelRefresh?.();
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
     this._cancelRefresh = startAutoRefresh(workspaceRoot, (stats) => {
-      try { webviewView.webview.postMessage(stats); } catch {}
+      try { this._view?.webview.postMessage(stats); } catch {}
     });
   }
 
@@ -112,14 +120,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     this._cancelRefresh?.();
   }
 
+  private _sending = false;
+
   private async _sendStats(): Promise<void> {
-    if (!this._view) return;
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+    // 防并发：上一轮未完成则跳过
+    if (this._sending) return;
+    this._sending = true;
     try {
+      // 捕获 this._view 引用，await 后校验
+      const view = this._view;
+      if (!view) return;
+      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
       const msg = await buildStatsMessage(workspaceRoot);
-      this._view.webview.postMessage(msg);
+      // 校验 view 仍为当前实例
+      if (this._view !== view) return;
+      view.webview.postMessage(msg);
     } catch {
       // WebView 已销毁
+    } finally {
+      this._sending = false;
     }
   }
 
@@ -139,7 +158,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       --border: var(--vscode-panel-border, #2a2c3d);
       --text-primary: var(--vscode-editor-foreground, #cdd6f4);
       --text-secondary: var(--vscode-descriptionForeground, #8b91a6);
-      --text-muted: var(--vscode-descriptionForeground, #5b6078);
+      --text-muted: color-mix(in srgb, var(--vscode-descriptionForeground, #8b91a6) 60%, transparent);
       --accent-purple: #7c3aed;
       --accent-blue: var(--vscode-focusBorder, #3b82f6);
       --accent-green: #22c55e;
@@ -148,6 +167,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       --accent-red: #ef4444;
       --font-mono: var(--vscode-editor-font-family, 'Cascadia Code', 'JetBrains Mono', 'Consolas', monospace);
       --font-sans: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
+      /* 语义化设计 token */
+      --overlay-bg: rgba(0, 0, 0, 0.75);
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
+      --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4);
+      --shadow-glow-purple: 0 0 8px rgba(124, 58, 237, 0.4);
+      --shadow-glow-blue: 0 0 8px rgba(59, 130, 246, 0.4);
+      --shadow-glow-green: 0 0 8px rgba(34, 197, 94, 0.4);
+      --shadow-glow-orange: 0 0 8px rgba(249, 115, 22, 0.4);
+      --radius-sm: 4px;
+      --radius-md: 8px;
+      --radius-lg: 12px;
+      --transition-fast: 0.15s ease;
+      --transition-normal: 0.25s ease;
     }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -159,7 +191,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       font-size: 13px;
       padding: 0;
       user-select: none;
-      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
     }
 
     /* ====== 标签页 ====== */
@@ -181,15 +216,34 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       font-weight: 500;
       transition: color 0.15s, border-color 0.15s;
     }
-    .tab:hover { color: var(--text-primary); }
+    .tab:hover { color: var(--text-primary); transform: translateY(-1px); }
     .tab.active {
       color: var(--accent-purple);
       border-bottom-color: var(--accent-purple);
     }
 
     /* ====== 面板内容 ====== */
-    .panel { display: none; padding: 14px 12px; }
-    .panel.active { display: block; }
+    .panel-container {
+      position: relative;
+      min-height: 300px;
+      flex: 1;
+      overflow-y: auto;
+    }
+    .panel {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      opacity: 0;
+      transform: translateY(8px);
+      pointer-events: none;
+      transition: opacity 0.25s ease, transform 0.25s ease;
+      padding: 14px 12px;
+    }
+    .panel.active {
+      position: relative;
+      opacity: 1;
+      transform: translateY(0);
+      pointer-events: auto;
+    }
 
     /* ====== Token 统计卡片 ====== */
     .section-title {
@@ -203,10 +257,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     .stat-card {
       background: var(--bg-surface);
-      border: 1px solid var(--border);
-      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: var(--radius-md);
       padding: 14px;
       margin-bottom: 12px;
+      box-shadow: var(--shadow-sm), 0 1px 3px rgba(0, 0, 0, 0.25);
     }
 
     .stat-row {
@@ -229,21 +284,29 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     /* 进度条 */
     .bar-wrap {
       background: var(--border);
-      border-radius: 3px;
-      height: 3px;
+      border-radius: var(--radius-sm);
+      height: 6px;
       margin-top: 4px;
       overflow: hidden;
     }
     .bar-fill {
       height: 100%;
-      border-radius: 3px;
-      transition: width 0.4s ease;
+      border-radius: var(--radius-sm);
+      transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
     }
-    .bar-purple { background: var(--accent-purple); }
-    .bar-blue   { background: var(--accent-blue); }
-    .bar-green  { background: var(--accent-green); }
-    .bar-yellow { background: var(--accent-yellow); }
-    .bar-orange { background: var(--accent-orange); }
+    .bar-purple { background: linear-gradient(90deg, #7c3aed, #a78bfa); box-shadow: var(--shadow-glow-purple); }
+    .bar-blue   { background: linear-gradient(90deg, #3b82f6, #60a5fa); box-shadow: var(--shadow-glow-blue); }
+    .bar-green  { background: linear-gradient(90deg, #22c55e, #4ade80); box-shadow: var(--shadow-glow-green); }
+    .bar-yellow { background: linear-gradient(90deg, #eab308, #facc15); }
+    .bar-orange { background: linear-gradient(90deg, #f97316, #fb923c); box-shadow: var(--shadow-glow-orange); }
+
+    /* 进度条扫光动画 */
+    @keyframes shimmer {
+      0% { filter: brightness(1); }
+      50% { filter: brightness(1.6); }
+      100% { filter: brightness(1); }
+    }
+    .bar-fill.animate { animation: shimmer 1.5s ease-in-out; }
 
     /* 总计大数字 */
     .total-section {
@@ -257,11 +320,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       font-size: 24px;
       font-weight: 700;
       color: var(--text-primary);
+      text-shadow: 0 0 20px rgba(205, 214, 244, 0.15);
     }
     .total-cost {
       font-family: var(--font-mono);
-      font-size: 18px;
-      color: var(--accent-blue);
+      font-size: 28px;
+      font-weight: 800;
+      background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
       margin-top: 2px;
     }
     .total-label {
@@ -324,16 +392,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       display: flex;
       align-items: center;
       padding: 6px 8px;
-      border-radius: 4px;
+      border-radius: var(--radius-sm);
       cursor: pointer;
       color: var(--text-secondary);
       font-size: 12px;
-      transition: background 0.1s;
+      transition: background var(--transition-fast), padding-left var(--transition-fast), color var(--transition-fast);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .file-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+    .file-item:hover { background: var(--bg-hover); color: var(--text-primary); padding-left: 12px; }
     .file-icon { margin-right: 8px; font-size: 14px; flex-shrink: 0; }
     .skill-item { display: block; white-space: normal; overflow: visible; text-overflow: clip; }
     .skill-desc {
@@ -385,7 +453,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       overflow: hidden;
       transition: max-height 0.3s ease;
     }
-    .mcp-list.expanded { max-height: 600px; }
+    .mcp-list.expanded { max-height: 2000px; }
 
     /* ====== 刷新按钮 ====== */
     .refresh-bar {
@@ -398,49 +466,79 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     .refresh-btn {
       background: var(--bg-surface);
       border: 1px solid var(--border);
-      border-radius: 4px;
+      border-radius: var(--radius-sm);
       color: var(--text-secondary);
       cursor: pointer;
       font-size: 11px;
       padding: 4px 10px;
-      transition: background 0.1s, color 0.1s;
+      transition: background var(--transition-fast), color var(--transition-fast), transform var(--transition-fast);
     }
-    .refresh-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+    .refresh-btn:hover { background: var(--bg-hover); color: var(--text-primary); transform: scale(1.05); }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    .refresh-icon { display: inline-block; }
+    .refresh-btn.refreshing .refresh-icon { animation: spin 1s linear infinite; }
     .settings-btn {
       display: block;
       width: 100%;
       background: var(--bg-surface);
-      border: 1px solid var(--border);
-      border-radius: 4px;
+      border: none;
+      border-top: 1px solid var(--border);
+      border-radius: 0;
       color: var(--text-secondary);
       cursor: pointer;
       font-size: 15px;
-      padding: 8px 0;
-      margin-top: 8px;
-      transition: background 0.1s, color 0.1s;
+      padding: 10px 0;
+      transition: background var(--transition-fast), color var(--transition-fast);
       line-height: 1;
       text-align: center;
+      flex-shrink: 0;
     }
     .settings-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
 
     /* ====== 设置弹窗 ====== */
     .modal-overlay {
-      display: none;
+      display: flex;
       position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-      background: rgba(0,0,0,0.8);
+      background: var(--overlay-bg);
+      backdrop-filter: blur(4px);
       z-index: 1000;
       justify-content: center; align-items: center;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.25s ease, visibility 0.25s;
     }
-    .modal-overlay.open { display: flex; }
+    .modal-overlay.open {
+      opacity: 1;
+      visibility: visible;
+    }
     .modal-box {
       background: var(--bg-surface);
-      border: 1px solid rgba(255,255,255,0.15);
-      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: var(--radius-md);
       padding: 20px 24px;
       width: 90%;
       max-width: 360px;
-      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      box-shadow: var(--shadow-md);
+      position: relative;
+      transform: translateY(20px) scale(0.97);
+      transition: transform 0.25s ease;
     }
+    .modal-overlay.open .modal-box {
+      transform: translateY(0) scale(1);
+    }
+    .modal-close {
+      position: absolute;
+      top: 10px; right: 14px;
+      cursor: pointer;
+      color: var(--text-secondary);
+      font-size: 16px;
+      line-height: 1;
+      transition: color var(--transition-fast);
+    }
+    .modal-close:hover { color: var(--text-primary); }
     .modal-box h2 {
       margin: 0 0 16px 0;
       font-size: 14px;
@@ -468,6 +566,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     .modal-field input:focus, .modal-field textarea:focus {
       outline: none;
       border-color: var(--accent-blue);
+      box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
     }
     .modal-actions {
       display: flex;
@@ -491,6 +590,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       color: #fff;
     }
     .modal-actions button.primary:hover { opacity: 0.9; }
+    .modal-hint {
+      font-size: 11px;
+      color: var(--text-muted);
+      line-height: 1.5;
+      margin-bottom: 16px;
+    }
+    .modal-hint a {
+      color: var(--accent-blue);
+      text-decoration: none;
+    }
+    .modal-hint a:hover { text-decoration: underline; }
+    .modal-hint code {
+      background: var(--bg-hover);
+      padding: 1px 4px;
+      border-radius: 2px;
+      font-size: 10px;
+    }
     .modal-toast {
       font-size: 11px;
       margin-top: 10px;
@@ -508,9 +624,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     .day-card {
       background: var(--bg-surface);
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: var(--radius-sm);
       padding: 10px 12px;
       margin-bottom: 8px;
+      transition: background var(--transition-fast), transform var(--transition-fast), border-color var(--transition-fast);
+    }
+    .day-card:hover {
+      background: var(--bg-hover);
+      transform: translateX(2px);
+      border-color: rgba(255, 255, 255, 0.08);
     }
     .day-card .day-header {
       display: flex;
@@ -546,7 +668,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     .month-card {
       background: var(--bg-surface);
       border: 1px solid var(--border);
-      border-left: 3px solid var(--accent-purple);
+      border-left: 3px solid;
+      border-image: linear-gradient(180deg, var(--accent-purple), transparent) 1;
       border-radius: 0 6px 6px 0;
       margin-bottom: 8px;
       overflow: hidden;
@@ -558,7 +681,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       padding: 10px 12px;
       cursor: pointer;
       user-select: none;
-      transition: background 0.1s;
+      transition: background var(--transition-fast);
     }
     .month-header:hover { background: var(--bg-hover); }
     .month-arrow {
@@ -566,8 +689,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       color: var(--text-secondary);
       width: 14px;
       flex-shrink: 0;
-      transition: transform 0.15s;
+      transition: transform 0.35s ease;
     }
+    .month-arrow.open { transform: rotate(90deg); }
     .month-label {
       font-weight: 600;
       font-size: 13px;
@@ -585,17 +709,58 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       color: var(--accent-blue);
     }
     .month-days {
-      display: none;
+      display: block;
+      max-height: 0;
+      overflow: hidden;
       border-top: 1px solid var(--border);
+      padding: 0 10px;
+      transition: max-height 0.35s ease, padding 0.35s ease;
+    }
+    .month-days.open {
+      max-height: 2000px;
       padding: 8px 10px;
     }
-    .month-days.open { display: block; }
     .month-days .day-card {
       margin-bottom: 4px;
       margin-left: 12px;
       padding: 6px 8px;
       background: rgba(255,255,255,0.02);
       border-radius: 4px;
+    }
+
+    /* ====== 骨架屏 ====== */
+    @keyframes skeleton-shimmer {
+      0% { background-position: -200px 0; }
+      100% { background-position: calc(200px + 100%) 0; }
+    }
+    .skeleton {
+      background: linear-gradient(90deg, var(--border) 25%, rgba(255,255,255,0.04) 50%, var(--border) 75%);
+      background-size: 200px 100%;
+      animation: skeleton-shimmer 1.5s ease-in-out infinite;
+      border-radius: var(--radius-sm);
+    }
+    .skeleton-row {
+      height: 14px;
+      margin-bottom: 8px;
+    }
+    .skeleton-bar {
+      height: 6px;
+      margin-top: 4px;
+    }
+    .skeleton-card {
+      padding: 14px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      margin-bottom: 12px;
+    }
+
+    /* ====== 内容淡入 ====== */
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+    .stat-card.updated {
+      animation: fadeIn 0.3s ease;
     }
 
     /* ====== 加载/错误状态 ====== */
@@ -625,6 +790,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       border: 1px solid rgba(239,68,68,0.3);
       color: var(--accent-red);
     }
+    /* 余额预警闪烁 */
+    .cost-warn {
+      color: var(--accent-red) !important;
+      -webkit-text-fill-color: var(--accent-red) !important;
+      animation: blink 1.5s ease-in-out infinite;
+    }
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
     .status-banner.status-empty {
       display: block;
       background: rgba(234,179,8,0.1);
@@ -648,72 +824,41 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   <div class="tab" data-tab="memory">记忆</div>
 </div>
 
+<div class="panel-container">
+
 <!-- ======= 今日面板 ======= -->
 <div id="panel-today" class="panel active">
   <div class="refresh-bar">
     <span class="last-updated" id="last-updated">—</span>
-    <button class="refresh-btn" id="refresh-btn" onclick="refresh()">刷新</button>
+    <button class="refresh-btn" id="refresh-btn" onclick="refresh()"><span class="refresh-icon">⟳</span> 刷新</button>
   </div>
 
   <div id="status-banner" class="status-banner status-loading">加载中...</div>
 
   <div class="section-title">上下文 · TOKENS</div>
   <div class="stat-card" id="stats-card">
-    <div class="stat-row">
-      <span class="stat-label"><span class="dot dot-purple"></span>输入</span>
-      <span class="stat-value" id="stat-input">—</span>
-    </div>
-    <div class="bar-wrap"><div class="bar-fill bar-purple" id="bar-input" style="width:0%"></div></div>
-
-    <div class="stat-row" style="margin-top:8px">
-      <span class="stat-label"><span class="dot dot-orange"></span>输出</span>
-      <span class="stat-value" id="stat-output">—</span>
-    </div>
-    <div class="bar-wrap"><div class="bar-fill bar-orange" id="bar-output" style="width:0%"></div></div>
-
-    <div class="stat-row" style="margin-top:8px">
-      <span class="stat-label"><span class="dot dot-blue"></span>缓存读取</span>
-      <span class="stat-value" id="stat-cache-read">—</span>
-    </div>
-    <div class="bar-wrap"><div class="bar-fill bar-blue" id="bar-cache-read" style="width:0%"></div></div>
-
-    <div class="stat-row" style="margin-top:8px">
-      <span class="stat-label"><span class="dot dot-green"></span>缓存写入</span>
-      <span class="stat-value" id="stat-cache-create">—</span>
-    </div>
-    <div class="bar-wrap"><div class="bar-fill bar-green" id="bar-cache-create" style="width:0%"></div></div>
-
-    <div class="total-section">
-      <div class="total-hint" id="total-hint" style="display:none">⚠ 当前会话数据尚未计入</div>
-
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-        <span class="month-label" style="margin:0">💰 充值余额</span>
-        <span class="total-cost" id="account-balance" style="font-size:16px">—</span>
-      </div>
-
-      <div class="month-label">今日消耗</div>
-      <div class="total-cost" id="total-cost">—</div>
-      <div class="total-sub" id="total-sub"></div>
-      <div class="model-list" id="model-list-today"></div>
-
-      <div class="divider"></div>
-
-      <div class="month-label">本月消耗</div>
-      <div class="total-cost" id="total-cost-all">—</div>
-      <div class="total-sub" id="total-sub-all"></div>
-      <div class="model-list" id="model-list-all"></div>
-    </div>
+    <!-- 骨架占位 -->
+    <div class="skeleton skeleton-row" style="width:40%"></div>
+    <div class="skeleton skeleton-row" style="width:60%;margin-top:10px"></div>
+    <div class="skeleton skeleton-row" style="width:50%"></div>
+    <div class="skeleton skeleton-row" style="width:45%;margin-top:10px"></div>
+    <div class="skeleton skeleton-row" style="width:55%"></div>
+    <div class="skeleton skeleton-row" style="width:35%;margin-top:16px"></div>
+    <div class="skeleton skeleton-row" style="width:70%"></div>
+    <div class="skeleton skeleton-row" style="width:25%;margin-top:12px"></div>
   </div>
 
   <div class="section-title mcp-toggle" onclick="toggleMcp()">🔌 MCP 服务器 <span class="mcp-arrow" id="mcp-arrow">▾</span></div>
   <div class="mcp-list" id="mcp-list"><span class="mcp-empty">检测中…</span></div>
-  <button class="settings-btn" id="settings-btn" onclick="openSettings()" title="设置">⚙ 设置</button>
 </div>
 
 
 <!-- ======= 历史面板 ======= -->
 <div id="panel-history" class="panel">
-  <div class="section-title">每日统计</div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+    <div class="section-title" style="margin-bottom:0">每日统计</div>
+    <button class="refresh-btn" onclick="exportCSV()" title="导出 CSV">📥 导出</button>
+  </div>
   <div id="history-list"><div class="loading">加载中…</div></div>
 </div>
 
@@ -737,22 +882,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
 </div>
 
+<button class="settings-btn" id="settings-btn" onclick="openSettings()" title="设置">⚙ 设置</button>
 
 <!-- ======= 设置弹窗 ======= -->
 <div class="modal-overlay" id="settings-modal">
   <div class="modal-box">
-    <h2>DeepSeek 平台认证设置</h2>
+    <span class="modal-close" onclick="closeSettings()">✕</span>
+    <h2>⚙ 设置</h2>
     <div class="modal-field">
-      <label>API Token</label>
-      <input type="password" id="auth-token" placeholder="Bearer token...">
+      <label>DeepSeek API Key</label>
+      <input type="password" id="auth-token" placeholder="sk-xxx...">
+    </div>
+    <div class="modal-hint">
+      💡 在 <a href="#" onclick="openDeepSeek();return false">platform.deepseek.com</a> → API Keys 创建
     </div>
     <div class="modal-field">
-      <label>User-Agent</label>
-      <input type="text" id="auth-ua" placeholder="Mozilla/5.0...">
-    </div>
-    <div class="modal-field">
-      <label>Cookie</label>
-      <textarea id="auth-cookie" placeholder="完整的 cookie 字符串..."></textarea>
+      <label>⚠ 余额预警阈值（元）</label>
+      <input type="number" id="auth-threshold" placeholder="10" min="1" step="0.1">
     </div>
     <div class="modal-actions">
       <button onclick="closeSettings()">取消</button>
@@ -789,28 +935,32 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     document.getElementById('modal-toast').textContent = '';
   }
 
+  function openDeepSeek() {
+    vscode.postMessage({ command: 'openUrl', url: 'https://platform.deepseek.com/api_keys' });
+  }
+
   function saveSettings() {
-    const token = document.getElementById('auth-token').value.trim();
-    const ua = document.getElementById('auth-ua').value.trim();
-    const cookie = document.getElementById('auth-cookie').value.trim();
-    vscode.postMessage({ command: 'saveAuth', token: token, userAgent: ua, cookie: cookie });
+    const apiKey = document.getElementById('auth-token').value.trim();
+    const threshold = parseFloat(document.getElementById('auth-threshold').value) || 10;
+    vscode.postMessage({ command: 'saveAuth', apiKey: apiKey, balanceThreshold: threshold });
   }
 
   // ====== 手动刷新 ======
+  function exportCSV() {
+    vscode.postMessage({ command: 'exportCSV' });
+  }
+
   function refresh() {
     const btn = document.getElementById('refresh-btn');
-    btn.textContent = '刷新中...';
+    btn.classList.add('refreshing');
     btn.disabled = true;
-    btn.style.opacity = '0.6';
-    showBanner('loading', '正在获取数据...');
     vscode.postMessage({ command: 'refresh' });
   }
 
   function refreshDone() {
     const btn = document.getElementById('refresh-btn');
-    btn.textContent = '刷新';
+    btn.classList.remove('refreshing');
     btn.disabled = false;
-    btn.style.opacity = '1';
   }
 
   function showBanner(status, text) {
@@ -857,9 +1007,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     // 认证数据回显
     if (msg.type === 'authData') {
       const d = msg.data || {};
-      document.getElementById('auth-token').value = d.token || '';
-      document.getElementById('auth-ua').value = d.userAgent || '';
-      document.getElementById('auth-cookie').value = d.cookie || '';
+      document.getElementById('auth-token').value = d.apiKey || '';
+      document.getElementById('auth-threshold').value = d.balanceThreshold || 10;
       return;
     }
 
@@ -869,6 +1018,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       if (msg.ok) {
         toast.className = 'modal-toast';
         toast.textContent = '已保存';
+        refresh();
         setTimeout(closeSettings, 800);
       } else {
         toast.className = 'modal-toast error';
@@ -880,8 +1030,49 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
   // ====== 今日面板 ======
   function updateTodayPanel(msg) {
+    const card = document.getElementById('stats-card');
+    // 首次收到数据时替换骨架屏
+    if (card && card.querySelector('.skeleton')) {
+      card.innerHTML =
+        '<div class="stat-row">' +
+          '<span class="stat-label"><span class="dot dot-purple"></span>输入</span>' +
+          '<span class="stat-value" id="stat-input">—</span>' +
+        '</div>' +
+        '<div class="bar-wrap"><div class="bar-fill bar-purple" id="bar-input" style="width:0%"></div></div>' +
+        '<div class="stat-row" style="margin-top:8px">' +
+          '<span class="stat-label"><span class="dot dot-orange"></span>输出</span>' +
+          '<span class="stat-value" id="stat-output">—</span>' +
+        '</div>' +
+        '<div class="bar-wrap"><div class="bar-fill bar-orange" id="bar-output" style="width:0%"></div></div>' +
+        '<div class="stat-row" style="margin-top:8px">' +
+          '<span class="stat-label"><span class="dot dot-blue"></span>缓存读取</span>' +
+          '<span class="stat-value" id="stat-cache-read">—</span>' +
+        '</div>' +
+        '<div class="bar-wrap"><div class="bar-fill bar-blue" id="bar-cache-read" style="width:0%"></div></div>' +
+        '<div class="stat-row" style="margin-top:8px">' +
+          '<span class="stat-label"><span class="dot dot-green"></span>缓存写入</span>' +
+          '<span class="stat-value" id="stat-cache-create">—</span>' +
+        '</div>' +
+        '<div class="bar-wrap"><div class="bar-fill bar-green" id="bar-cache-create" style="width:0%"></div></div>' +
+        '<div class="total-section">' +
+          '<div class="total-hint" id="total-hint" style="display:none">⚠ 当前会话数据尚未计入</div>' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">' +
+            '<span class="month-label" style="margin:0">💰 充值余额</span>' +
+            '<span class="total-cost" id="account-balance" style="font-size:16px">—</span>' +
+          '</div>' +
+          '<div class="month-label">今日消耗</div>' +
+          '<div class="total-cost" id="total-cost">—</div>' +
+          '<div class="total-sub" id="total-sub"></div>' +
+          '<div class="model-list" id="model-list-today"></div>' +
+          '<div class="divider"></div>' +
+          '<div class="month-label">本月消耗</div>' +
+          '<div class="total-cost" id="total-cost-all">—</div>' +
+          '<div class="total-sub" id="total-sub-all"></div>' +
+          '<div class="model-list" id="model-list-all"></div>' +
+        '</div>';
+    }
+
     // 进度条：用今日数据
-    // 仅用今日数据（无数据时归零，不回退累计值造成误导）
     const today = msg.today || { input: 0, output: 0, cacheRead: 0, cacheCreate: 0, totalTokens: 0, cost: 0 };
     const promptTotal = (today.input || 0) + (today.cacheRead || 0) + (today.cacheCreate || 0);
     const barBase = Math.max(promptTotal, today.output || 0, 1);
@@ -896,19 +1087,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     // 今日消耗
     const hitRate = promptTotal > 0 ? ((today.cacheRead || 0) / promptTotal * 100).toFixed(1) : '0';
-    document.getElementById('total-cost').textContent = '¥' + (today.cost || 0).toFixed(2);
+    var costEl = document.getElementById('total-cost');
+    costEl.textContent = '¥' + (today.cost || 0).toFixed(2);
+    // 余额预警
+    var balEl = document.getElementById('account-balance');
+    if (msg.overThreshold) {
+      balEl.classList.add('cost-warn');
+      balEl.title = '⚠ 余额低于预警阈值 ¥' + (msg.balanceThreshold || 10);
+    } else {
+      balEl.classList.remove('cost-warn');
+      balEl.title = '';
+    }
     document.getElementById('total-sub').textContent = formatNum(today.totalTokens || 0) + ' tokens · 命中 ' + hitRate + '%';
     document.getElementById('model-list-today').innerHTML = renderModels(
       (msg.today && msg.today.modelBreakdown) || []
     );
-    // 今日数据为零时显示提示（当前会话未落盘）
+    // 今日数据为零时显示提示
     document.getElementById('total-hint').style.display = (today.cost || 0) === 0 ? 'block' : 'none';
 
-    // 本月消耗（数据来源与 DeepSeek 官网一致）
+    // 本月消耗
     const mon = msg.monthlyTotals || msg.totals;
     document.getElementById('total-cost-all').textContent = '¥' + (mon.cost || 0).toFixed(2);
     document.getElementById('total-sub-all').textContent = formatNum(mon.totalTokens || 0) + ' tokens';
     document.getElementById('model-list-all').innerHTML = renderModels(msg.monthlyModelBreakdown || msg.modelBreakdown || []);
+
+    // 淡入动画
+    card.classList.add('updated');
+    setTimeout(function() { card.classList.remove('updated'); }, 300);
   }
 
   function setStat(id, val, barBase) {
@@ -997,13 +1202,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const card = header.parentElement;
     const days = card.querySelector('.month-days');
     const arrow = card.querySelector('.month-arrow');
-    if (days.classList.contains('open')) {
-      days.classList.remove('open');
-      arrow.textContent = '▸';
-    } else {
-      days.classList.add('open');
-      arrow.textContent = '▴';
-    }
+    const isOpen = days.classList.toggle('open');
+    arrow.classList.toggle('open', isOpen);
   }
 
   // ====== 文件面板 ======
@@ -1105,7 +1305,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
   // ====== 工具函数 ======
   function formatNum(n) {
-    if (!n || n < 0) return '0';
+    if (typeof n !== 'number' || isNaN(n) || !n || n < 0) return '0';
     if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
     if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
     return String(Math.floor(n));
@@ -1113,11 +1313,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
   function escHtml(s) {
     const d = document.createElement('div');
-    d.textContent = s;
+    d.textContent = String(s ?? '');
     return d.innerHTML;
   }
 
-  const MODEL_DOTS ={ 'deepseek-v4-pro': 'dot-purple', 'deepseek-v4-flash': 'dot-blue' };
+  const MODEL_DOTS = {
+    'deepseek-v4-pro': 'dot-purple',
+    'deepseek-v4-flash': 'dot-blue',
+  };
   function renderModels(models) {
     return models.map(function(m) {
       const dot = MODEL_DOTS[m.model] || 'dot-green';

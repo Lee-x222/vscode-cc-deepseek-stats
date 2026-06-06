@@ -61,6 +61,10 @@ export interface StatsMessage {
   monthlyGlobalCost: number;
   /** DeepSeek 平台账户余额 */
   balance: number;
+  /** 平台余额是否低于预警阈值 */
+  overThreshold: boolean;
+  /** 当前生效的余额预警阈值 */
+  balanceThreshold: number;
   /** 工作区根目录，WebView 用来打开文件 */
   workspaceRoot: string;
   /** 用户 HOME 目录 */

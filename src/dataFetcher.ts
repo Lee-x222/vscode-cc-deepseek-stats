@@ -329,7 +329,7 @@ function dsDayToEntry(date: string, dm: DsDayMap): DailyEntry {
   const breakdown: ModelCost[] = [];
   for (const [model, m] of Object.entries(dm) as [string, DsDayModel][]) {
     if (model === 'deepseek-chat & deepseek-reasoner') continue;
-    const t = m.tokens;
+    const t = m.tokens || {};
     const input = (t.cacheMiss || 0) + (t.prompt || 0);
     const output = t.response || 0;
     const cacheRead = t.cacheHit || 0;
@@ -697,6 +697,18 @@ export async function buildStatsMessage(workspaceRoot: string): Promise<StatsMes
 
   const hasData = entries.length > 0 && entries.some(e => e.totalTokens > 0);
 
+  // 余额预警：从配置文件读取，未设置默认 10 元
+  let balanceThreshold = 10;
+  try {
+    const authRaw = fs.readFileSync(path.join(home, '.claude', 'deepseek_auth.json'), 'utf-8');
+    const auth = JSON.parse(authRaw);
+    if (typeof auth.balanceThreshold === 'number' && auth.balanceThreshold > 0) {
+      balanceThreshold = auth.balanceThreshold;
+    }
+  } catch { /* 配置文件不存在或格式错误，用默认值 */ }
+  const balance = ds?.balance || 0;
+  const overThreshold = (balance > 0 && balance < balanceThreshold);
+
   return {
     type: 'update',
     status: hasData ? 'ok' : 'empty',
@@ -717,7 +729,9 @@ export async function buildStatsMessage(workspaceRoot: string): Promise<StatsMes
     workspaceRoot,
     home,
     projectSlug: workspaceRoot.replace(/[^a-zA-Z0-9]/g, '-'),
-    balance: ds?.balance || 0,
+    balance,
+    overThreshold,
+    balanceThreshold,
   };
 }
 
