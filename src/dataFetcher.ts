@@ -254,7 +254,7 @@ const LIVE_FETCH_INTERVAL = 2 * 60 * 1000;
 
 /** DeepSeek 平台数据：优先调 fetch_deepseek.js 实时拉（限频+互斥锁），失败降级读缓存 */
 async function fetchDeepSeekPlatformUsage(home: string): Promise<DsUsageCache | null> {
-  const scriptPath = path.join(home, '.claude', 'fetch_deepseek.js');
+  const scriptPath = path.resolve(__dirname, '..', 'fetch_deepseek.js');
   if (Date.now() - _lastLiveFetch > LIVE_FETCH_INTERVAL && !_fetching) {
     _fetching = true;
     try {
