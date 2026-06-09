@@ -14,23 +14,23 @@ export function activate(context: vscode.ExtensionContext) {
 
   // 刷新命令
   context.subscriptions.push(
-    vscode.commands.registerCommand('vscode-cc-statistics.refresh', () => {
+    vscode.commands.registerCommand('vscode-cc-deepseek-stats.refresh', () => {
       provider.refresh();
     })
   );
 
   // 打开面板命令
   context.subscriptions.push(
-    vscode.commands.registerCommand('vscode-cc-statistics.openPanel', () => {
+    vscode.commands.registerCommand('vscode-cc-deepseek-stats.openPanel', () => {
       vscode.commands.executeCommand(
-        'workbench.view.extension.vscode-cc-statistics-container'
+        'workbench.view.extension.vscode-cc-deepseek-stats-container'
       );
     })
   );
 
   // CSV 导出命令
   context.subscriptions.push(
-    vscode.commands.registerCommand('vscode-cc-statistics.exportCSV', async () => {
+    vscode.commands.registerCommand('vscode-cc-deepseek-stats.exportCSV', async () => {
       const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
       const msg = await buildStatsMessage(wsRoot);
       const entries = msg.allDays || [];
@@ -60,7 +60,7 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   // 启动时自动打开面板
-  vscode.commands.executeCommand('workbench.view.extension.vscode-cc-statistics-container');
+  vscode.commands.executeCommand('workbench.view.extension.vscode-cc-deepseek-stats-container');
 }
 
 export function deactivate() {

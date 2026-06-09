@@ -46,7 +46,7 @@ function collectJsonlFiles(dir: string): string[] {
     }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
-      console.error('[vscode-cc-statistics] collectJsonlFiles 错误:', e);
+      console.error('[vscode-cc-deepseek-stats] collectJsonlFiles 错误:', e);
     }
   }
   return results;
@@ -126,7 +126,7 @@ function parseAll(dir: string): {
         } catch { /* 单行 JSON 解析失败，跳过 */ }
       }
     } catch (e) {
-      console.error('[vscode-cc-statistics] parseAll 读取文件失败:', file, e);
+      console.error('[vscode-cc-deepseek-stats] parseAll 读取文件失败:', file, e);
     }
   }
 
@@ -216,7 +216,7 @@ async function parseHermes(home: string): Promise<{
     }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
-      console.error('[vscode-cc-statistics] parseHermes 错误:', e);
+      console.error('[vscode-cc-deepseek-stats] parseHermes 错误:', e);
     }
   }
 
@@ -751,7 +751,7 @@ export function startAutoRefresh(
       const msg = await buildStatsMessage(workspaceRoot);
       if (!cancelled) callback(msg);
     } catch (e) {
-      console.error('[vscode-cc-statistics] 自动刷新失败:', e);
+      console.error('[vscode-cc-deepseek-stats] 自动刷新失败:', e);
     }
     if (!cancelled) {
       timer = setTimeout(tick, interval);

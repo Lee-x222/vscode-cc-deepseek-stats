@@ -8,7 +8,7 @@ import { buildStatsMessage, startAutoRefresh } from './dataFetcher';
  * WebView Provider —— 管理侧边栏 HTML 内容与消息通信。
  */
 export class SidebarProvider implements vscode.WebviewViewProvider {
-  public static readonly viewType = 'vscode-cc-statistics.panel';
+  public static readonly viewType = 'vscode-cc-deepseek-stats.panel';
   private _view?: vscode.WebviewView;
   private _cancelRefresh?: () => void;
 
@@ -50,21 +50,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         if (ALLOWED_COMMANDS.has(msg.cmd)) {
           vscode.commands.executeCommand(msg.cmd);
         } else {
-          console.warn('[vscode-cc-statistics] 阻止未授权的 exec 命令:', msg.cmd);
+          console.warn('[vscode-cc-deepseek-stats] 阻止未授权的 exec 命令:', msg.cmd);
         }
       } else if (msg.command === 'openFile') {
         const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
         const resolved = path.resolve(wsRoot, msg.file);
         // 防路径遍历：确保解析后的路径仍在工作区内
         if (!resolved.startsWith(path.resolve(wsRoot) + path.sep) && resolved !== path.resolve(wsRoot)) {
-          console.warn('[vscode-cc-statistics] 阻止越界文件访问:', msg.file);
+          console.warn('[vscode-cc-deepseek-stats] 阻止越界文件访问:', msg.file);
           return;
         }
         vscode.commands.executeCommand('vscode.open', vscode.Uri.file(resolved));
       } else if (msg.command === 'openMemory') {
         const home = process.env.HOME || process.env.USERPROFILE || '';
         if (!home) {
-          console.warn('[vscode-cc-statistics] HOME 未设置，无法打开记忆文件');
+          console.warn('[vscode-cc-deepseek-stats] HOME 未设置，无法打开记忆文件');
           return;
         }
         const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
@@ -82,7 +82,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           webviewView.webview.postMessage({ type: 'authData', data: {} });
         }
       } else if (msg.command === 'exportCSV') {
-        vscode.commands.executeCommand('vscode-cc-statistics.exportCSV');
+        vscode.commands.executeCommand('vscode-cc-deepseek-stats.exportCSV');
       } else if (msg.command === 'openUrl') {
         vscode.env.openExternal(vscode.Uri.parse(msg.url));
       } else if (msg.command === 'saveAuth') {
