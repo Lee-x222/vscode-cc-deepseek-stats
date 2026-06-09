@@ -6,6 +6,117 @@ import { CcUsageResult, DailyEntry, ModelCost, StatsMessage } from './types';
 
 const REFRESH_INTERVAL = 30_000;
 
+// ====== 缓存层 ======
+const _quickCache = new Map<string, { data: StatsMessage; ts: number }>();
+const _fullCache = new Map<string, { data: StatsMessage; ts: number }>();
+const QUICK_CACHE_TTL = 30_000;
+const FULL_CACHE_TTL = 120_000;
+
+let _skillsCache: { skills: { name: string; description: string }[]; ts: number } | null = null;
+const SKILLS_CACHE_TTL = 600_000;  // 技能列表 10 分钟内不变
+
+const _mcpCache = new Map<string, { data: string[]; ts: number }>();
+const MCP_CACHE_TTL = 300_000;
+
+const _memCache = new Map<string, { data: string[]; ts: number }>();
+const MEM_CACHE_TTL = 300_000;
+
+const _filesCache = new Map<string, { data: string[]; ts: number }>();
+const FILES_CACHE_TTL = 60_000;
+
+/** 通用缓存读取：命中且未过期返回 data，否则 null */
+function cacheGet<T>(cache: Map<string, { data: T; ts: number }>, key: string, ttl: number): T | null {
+  const entry = cache.get(key);
+  if (entry && Date.now() - entry.ts < ttl) return entry.data;
+  return null;
+}
+
+/** 通用缓存写入 */
+function cacheSet<T>(cache: Map<string, { data: T; ts: number }>, key: string, data: T): void {
+  cache.set(key, { data, ts: Date.now() });
+}
+
+// ====== JSONL 文件级解析缓存 ======
+// JSONL 文件是追加写入的，旧内容永不改变 → 按 (路径 + mtime) 缓存解析结果
+interface CachedLine {
+  ts: string;       // timestamp
+  date: string;     // YYYY-MM-DD
+  input: number;
+  output: number;
+  cacheCreate: number;
+  cacheRead: number;
+  model: string;
+  msgId: string;
+}
+const _parseFileCache = new Map<string, { mtime: number; lines: CachedLine[] }>();
+
+/** 从单个 JSONL 文件中提取 CachedLine[]，优先走缓存 */
+function parseOneFile(file: string): CachedLine[] {
+  let mtime = 0;
+  try { mtime = fs.statSync(file).mtimeMs; } catch { return []; }
+
+  const cached = _parseFileCache.get(file);
+  if (cached && cached.mtime === mtime) {
+    return cached.lines;
+  }
+
+  const lines: CachedLine[] = [];
+  try {
+    for (const line of fs.readFileSync(file, 'utf-8').split('\n')) {
+      try {
+        const e = JSON.parse(line);
+        const msg = e.message;
+        if (!msg?.usage) continue;
+        const u = msg.usage;
+        const ts = e.timestamp;
+        if (!ts) continue;
+        lines.push({
+          ts,
+          date: ts.slice(0, 10),
+          input: u.input_tokens || 0,
+          output: u.output_tokens || 0,
+          cacheCreate: u.cache_creation_input_tokens || 0,
+          cacheRead: u.cache_read_input_tokens || 0,
+          model: msg.model || 'unknown',
+          msgId: msg.id || '',
+        });
+      } catch { /* 单行 JSON 解析失败，跳过 */ }
+    }
+  } catch (e) {
+    console.error('[vscode-cc-deepseek-stats] parseOneFile 读取失败:', file, e);
+  }
+
+  _parseFileCache.set(file, { mtime, lines });
+  return lines;
+}
+
+/** 收集目录下最近 N 天修改的 session 子目录中的 JSONL，recentDays=0 表示全量 */
+function collectRecentJsonlFiles(dir: string, recentDays: number): string[] {
+  const results: string[] = [];
+  const cutoff = recentDays > 0 ? Date.now() - recentDays * 24 * 60 * 60 * 1000 : 0;
+  try {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        // 如果是最外层 session 目录，做 mtime 过滤
+        if (recentDays > 0) {
+          try {
+            if (fs.statSync(full).mtimeMs < cutoff) continue;
+          } catch { continue; }
+        }
+        results.push(...collectRecentJsonlFiles(full, 0)); // 子目录不再过滤
+      } else if (entry.name.endsWith('.jsonl')) {
+        results.push(full);
+      }
+    }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.error('[vscode-cc-deepseek-stats] collectRecentJsonlFiles 错误:', e);
+    }
+  }
+  return results;
+}
+
 // 公共定价表（单位：元/百万token）
 const PRICING: Record<string, { in: number; out: number; cache: number }> = {
   'deepseek-v4-pro':   { in: 3,    out: 6,    cache: 0.025 },
@@ -52,7 +163,7 @@ function collectJsonlFiles(dir: string): string[] {
   return results;
 }
 
-function parseAll(dir: string): {
+function parseAll(dir: string, recentDays = 0): {
   dayMap: Map<string, DailyEntry>;
   modelMap: Map<string, ModelCost>;
 } {
@@ -62,71 +173,65 @@ function parseAll(dir: string): {
 
   const seenIds = new Set<string>();
 
-  for (const file of collectJsonlFiles(dir)) {
-    try {
-      for (const line of fs.readFileSync(file, 'utf-8').split('\n')) {
-        try {
-          const e = JSON.parse(line);
-          const msg = e.message;
-          if (!msg?.usage) continue;
-          const msgId = msg.id;
-          if (msgId && seenIds.has(msgId)) continue;
-          if (msgId) seenIds.add(msgId);
-          const u = msg.usage;
-          const ts = e.timestamp;
-          if (!ts) continue;
+  const files = recentDays > 0
+    ? collectRecentJsonlFiles(dir, recentDays)
+    : collectJsonlFiles(dir);
 
-          const date = ts.slice(0, 10);
-          const input = u.input_tokens || 0;
-          const output = u.output_tokens || 0;
-          const cc = u.cache_creation_input_tokens || 0;
-          const cr = u.cache_read_input_tokens || 0;
-          const model = msg.model || 'unknown';
-          const p = PRICING[model] || PRICING['deepseek-v4-pro'];
-          const cost = (input + cc) / 1e6 * p.in + output / 1e6 * p.out + cr / 1e6 * p.cache;
+  for (const file of files) {
+    // 优先走文件级缓存（mtime 未变则跳过 readFileSync + JSON.parse）
+    for (const cl of parseOneFile(file)) {
+      const input = cl.input;
+      const output = cl.output;
+      const cc = cl.cacheCreate;
+      const cr = cl.cacheRead;
+      const model = cl.model;
+      const date = cl.date;
+      const msgId = cl.msgId;
 
-          // 按日期聚合
-          const day = dayMap.get(date);
-          if (day) {
-            day.input += input; day.output += output;
-            day.cacheCreate += cc; day.cacheRead += cr;
-            day.totalTokens += input + output + cc + cr;
-            day.cost += cost;
-            if (model && !day.models.includes(model)) day.models.push(model);
-          } else {
-            dayMap.set(date, {
-              date, agent: 'claude', models: model ? [model] : [],
-              input, output, cacheCreate: cc, cacheRead: cr,
-              totalTokens: input + output + cc + cr, cost,
-              modelBreakdown: [],
-            });
-          }
+      if (msgId && seenIds.has(msgId)) continue;
+      if (msgId) seenIds.add(msgId);
 
-          // 按日期+模型聚合
-          let dm = dayModelMap.get(date);
-          if (!dm) { dm = new Map(); dayModelMap.set(date, dm); }
-          const dmb = dm.get(model);
-          if (dmb) {
-            dmb.input += input; dmb.output += output;
-            dmb.cacheCreate += cc; dmb.cacheRead += cr;
-            dmb.cost += cost;
-          } else {
-            dm.set(model, { model, input, output, cacheRead: cr, cacheCreate: cc, cost });
-          }
+      const p = PRICING[model] || PRICING['deepseek-v4-pro'];
+      const cost = (input + cc) / 1e6 * p.in + output / 1e6 * p.out + cr / 1e6 * p.cache;
 
-          // 全部模型聚合
-          const mb = modelMap.get(model);
-          if (mb) {
-            mb.input += input; mb.output += output;
-            mb.cacheCreate += cc; mb.cacheRead += cr;
-            mb.cost += cost;
-          } else {
-            modelMap.set(model, { model, input, output, cacheRead: cr, cacheCreate: cc, cost });
-          }
-        } catch { /* 单行 JSON 解析失败，跳过 */ }
+      // 按日期聚合
+      const day = dayMap.get(date);
+      if (day) {
+        day.input += input; day.output += output;
+        day.cacheCreate += cc; day.cacheRead += cr;
+        day.totalTokens += input + output + cc + cr;
+        day.cost += cost;
+        if (model && !day.models.includes(model)) day.models.push(model);
+      } else {
+        dayMap.set(date, {
+          date, agent: 'claude', models: model ? [model] : [],
+          input, output, cacheCreate: cc, cacheRead: cr,
+          totalTokens: input + output + cc + cr, cost,
+          modelBreakdown: [],
+        });
       }
-    } catch (e) {
-      console.error('[vscode-cc-deepseek-stats] parseAll 读取文件失败:', file, e);
+
+      // 按日期+模型聚合
+      let dm = dayModelMap.get(date);
+      if (!dm) { dm = new Map(); dayModelMap.set(date, dm); }
+      const dmb = dm.get(model);
+      if (dmb) {
+        dmb.input += input; dmb.output += output;
+        dmb.cacheCreate += cc; dmb.cacheRead += cr;
+        dmb.cost += cost;
+      } else {
+        dm.set(model, { model, input, output, cacheRead: cr, cacheCreate: cc, cost });
+      }
+
+      // 全部模型聚合
+      const mb = modelMap.get(model);
+      if (mb) {
+        mb.input += input; mb.output += output;
+        mb.cacheCreate += cc; mb.cacheRead += cr;
+        mb.cost += cost;
+      } else {
+        modelMap.set(model, { model, input, output, cacheRead: cr, cacheCreate: cc, cost });
+      }
     }
   }
 
@@ -359,11 +464,11 @@ function dsDayToEntry(date: string, dm: DsDayMap): DailyEntry {
   };
 }
 
-export function fetchCcUsage(workspaceRoot: string): CcUsageResult | null {
+export function fetchCcUsage(workspaceRoot: string, recentDays = 0): CcUsageResult | null {
   const home = process.env.HOME || process.env.USERPROFILE || '';
   const projectDir = path.join(home, '.claude', 'projects',
     workspaceRoot.replace(/[^a-zA-Z0-9]/g, '-'));
-  const { dayMap, modelMap } = parseAll(projectDir);
+  const { dayMap, modelMap } = parseAll(projectDir, recentDays);
   const entries = Array.from(dayMap.values()).sort((a, b) => a.date.localeCompare(b.date));
   const totals = {
     input: entries.reduce((s, e) => s + e.input, 0),
@@ -527,14 +632,56 @@ export function getMcpServers(workspaceRoot: string): string[] {
   return Array.from(servers);
 }
 
-export async function buildStatsMessage(workspaceRoot: string): Promise<StatsMessage> {
-  const result = fetchCcUsage(workspaceRoot);
-  let entries: DailyEntry[] = result?.entries || [];
+// ====== 带缓存的辅助读取函数（避免每次刷新都读文件） ======
+
+function getSkillsCached(workspaceRoot: string): { name: string; description: string }[] {
+  const key = workspaceRoot;
+  if (_skillsCache && Date.now() - _skillsCache.ts < SKILLS_CACHE_TTL) {
+    return _skillsCache.skills;
+  }
+  const skills = getSkills(workspaceRoot);
+  _skillsCache = { skills, ts: Date.now() };
+  return skills;
+}
+
+function getMcpServersCached(workspaceRoot: string): string[] {
+  const key = workspaceRoot;
+  const hit = cacheGet(_mcpCache, key, MCP_CACHE_TTL);
+  if (hit) return hit;
+  const servers = getMcpServers(workspaceRoot);
+  cacheSet(_mcpCache, key, servers);
+  return servers;
+}
+
+function getMemoryFilesCached(workspaceRoot: string): string[] {
+  const key = workspaceRoot;
+  const hit = cacheGet(_memCache, key, MEM_CACHE_TTL);
+  if (hit) return hit;
+  const files = getMemoryFiles(workspaceRoot);
+  cacheSet(_memCache, key, files);
+  return files;
+}
+
+function getProjectFilesCached(workspaceRoot: string): string[] {
+  const key = workspaceRoot;
+  const hit = cacheGet(_filesCache, key, FILES_CACHE_TTL);
+  if (hit) return hit;
+  const files = getProjectFiles(workspaceRoot);
+  cacheSet(_filesCache, key, files);
+  return files;
+}
+
+// ====== 快速首屏消息（同步，仅当前项目） ======
+
+/** 构建轻量级 StatsMessage — 只解析当前项目 JSONL + 缓存读其他数据，<200ms */
+export function buildQuickMessage(workspaceRoot: string, recentDays = 7): StatsMessage {
+  const result = fetchCcUsage(workspaceRoot, recentDays); // 默认只扫最近 7 天的 session
+  const entries = result?.entries || [];
   let today: DailyEntry | null = entries[entries.length - 1] || null;
   const todayStr = new Date().toISOString().slice(0, 10);
   if (today && today.date !== todayStr) today = null;
 
-  // 本月汇总：用 UTC 月份，与 DeepSeek 官网一致
+  // 本月汇总（当前项目）
   const now = new Date();
   const monthPrefix = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
   const monthEntries = entries.filter(e => e.date.startsWith(monthPrefix));
@@ -546,7 +693,8 @@ export async function buildStatsMessage(workspaceRoot: string): Promise<StatsMes
     totalTokens: monthEntries.reduce((s, e) => s + e.totalTokens, 0),
     cost: monthEntries.reduce((s, e) => s + e.cost, 0),
   };
-  // 当前项目本月模型拆分
+
+  // 本月模型拆分
   const monthModelMap = new Map<string, ModelCost>();
   for (const e of monthEntries) {
     for (const m of e.modelBreakdown || []) {
@@ -561,26 +709,89 @@ export async function buildStatsMessage(workspaceRoot: string): Promise<StatsMes
     }
   }
 
-  // 扫描所有项目计算全局总费用 & 月度其他费用
-  let globalCost = result?.totals.cost || 0;
+  const totals = result?.totals || { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, totalTokens: 0, cost: 0 };
+  const modelBreakdown = result?.modelBreakdown || [];
+  const hasData = entries.length > 0 && entries.some(e => e.totalTokens > 0);
+
+  // 余额阈值（从配置文件读，常驻内存会变但频率低，不做缓存）
+  const home = process.env.HOME || process.env.USERPROFILE || '';
+  let balanceThreshold = 10;
+  try {
+    const authRaw = fs.readFileSync(path.join(home, '.claude', 'deepseek_auth.json'), 'utf-8');
+    const auth = JSON.parse(authRaw);
+    if (typeof auth.balanceThreshold === 'number' && auth.balanceThreshold > 0) {
+      balanceThreshold = auth.balanceThreshold;
+    }
+  } catch { /* 用默认值 */ }
+
+  // 尝试读缓存 DS 数据获取余额（不从平台实时拉）
+  let balance = 0;
+  try {
+    const dsRaw = fs.readFileSync(path.join(home, '.claude', 'deepseek_usage.json'), 'utf-8');
+    const dsData = JSON.parse(dsRaw);
+    if (dsData.balance) balance = dsData.balance;
+  } catch { /* 无缓存 */ }
+
+  const overThreshold = (balance > 0 && balance < balanceThreshold);
+
+  return {
+    type: 'update',
+    status: hasData ? 'ok' : 'loading',
+    today,
+    allDays: entries,
+    totals,
+    mcpServers: getMcpServersCached(workspaceRoot),
+    memoryFiles: getMemoryFilesCached(workspaceRoot),
+    projectFiles: getProjectFilesCached(workspaceRoot),
+    skills: getSkillsCached(workspaceRoot),
+    modelBreakdown,
+    globalCost: totals.cost,
+    otherCost: 0,
+    monthlyTotals,
+    monthlyModelBreakdown: Array.from(monthModelMap.values())
+      .filter(m => m.input > 0 || m.output > 0)
+      .sort((a, b) => b.cost - a.cost),
+    monthlyOtherCost: 0,
+    monthlyGlobalCost: monthlyTotals.cost,
+    workspaceRoot,
+    home,
+    projectSlug: workspaceRoot.replace(/[^a-zA-Z0-9]/g, '-'),
+    balance,
+    overThreshold,
+    balanceThreshold,
+  };
+}
+
+// ====== 异步丰富消息（其他项目 + Hermes + DeepSeek 平台） ======
+
+/** 在快速消息基础上补充慢数据 — 其他项目扫描、Hermes DB、DeepSeek 平台实时用量 */
+async function enrichMessage(workspaceRoot: string, base: StatsMessage): Promise<StatsMessage> {
+  const home = base.home;
+  const currentSlug = base.projectSlug;
+
+  const now = new Date();
+  const monthPrefix = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+
+  // 累积器 —— 从 base 数据初始化
+  let globalCost = base.globalCost;
   let otherCost = 0;
   let monthlyOtherCost = 0;
   const globalModelMap = new Map<string, ModelCost>();
-  // 先合并当前项目的模型数据
-  for (const m of result?.modelBreakdown || []) {
-    globalModelMap.set(m.model, { ...m });
-  }
-  // 扫描其他项目
-  const home = process.env.HOME || process.env.USERPROFILE || '';
+  const monthModelMap = new Map<string, ModelCost>();
+  for (const m of base.modelBreakdown) globalModelMap.set(m.model, { ...m });
+  for (const m of base.monthlyModelBreakdown) monthModelMap.set(m.model, { ...m });
+
+  // 先启动异步操作（外部进程 — 它们会并行运行）
+  const hermesPromise = parseHermes(home);
+  const dsPromise = fetchDeepSeekPlatformUsage(home);
+
+  // 同步：扫描其他项目（利用异步进程启动后的等待时间）
   const projectsDir = path.join(home, '.claude', 'projects');
-  const currentSlug = workspaceRoot.replace(/[^a-zA-Z0-9]/g, '-');
   try {
     for (const dir of fs.readdirSync(projectsDir)) {
       if (dir === currentSlug) continue;
       const full = path.join(projectsDir, dir);
-      try {
-        if (!fs.statSync(full).isDirectory()) continue;
-      } catch { /* stat 失败，跳过 */ continue; }
+      try { if (!fs.statSync(full).isDirectory()) continue; } catch { continue; }
       const other = parseAll(full);
       let otherSum = 0;
       for (const [model, mc] of other.modelMap) {
@@ -596,7 +807,6 @@ export async function buildStatsMessage(workspaceRoot: string): Promise<StatsMes
       }
       otherCost += otherSum;
       globalCost += otherSum;
-      // 月度：按日期过滤其他项目
       for (const [date, entry] of other.dayMap) {
         if (date.startsWith(monthPrefix)) {
           monthlyOtherCost += entry.cost;
@@ -615,8 +825,10 @@ export async function buildStatsMessage(workspaceRoot: string): Promise<StatsMes
     }
   } catch { /* projects 目录不存在 */ }
 
-  // 合并 Hermes（DeepSeek API）消耗
-  const hermes = await parseHermes(home);
+  // 等待异步结果
+  const [hermes, ds] = await Promise.all([hermesPromise, dsPromise]);
+
+  // 合并 Hermes
   let hermesSum = 0;
   for (const [model, mc] of hermes.modelMap) {
     hermesSum += mc.cost;
@@ -647,7 +859,8 @@ export async function buildStatsMessage(workspaceRoot: string): Promise<StatsMes
     }
   }
 
-  let monthlyGlobalCost = monthlyTotals.cost + monthlyOtherCost;
+  // 构建中间结果
+  let monthlyGlobalCost = base.monthlyTotals.cost + monthlyOtherCost;
   const globalModelBreakdown = Array.from(globalModelMap.values())
     .filter(m => m.input > 0 || m.output > 0)
     .sort((a, b) => b.cost - a.cost);
@@ -655,12 +868,14 @@ export async function buildStatsMessage(workspaceRoot: string): Promise<StatsMes
     .filter(m => m.input > 0 || m.output > 0)
     .sort((a, b) => b.cost - a.cost);
 
-  // DeepSeek 平台实时数据，覆盖本月汇总 + 今日
-  // DS 数据已包含所有项目 + Hermes，所以覆盖后 other/global 也以它为准
-  const ds = await fetchDeepSeekPlatformUsage(home);
+  // DeepSeek 平台数据覆盖
+  let today = base.today;
+  let monthlyTotals = { ...base.monthlyTotals };
+  let allDays = [...base.allDays];
+  let balance = base.balance;
+
   const dsBreakdown = dsToModelBreakdown(ds);
   if (ds && ds.totalCost > 0) {
-    // 汇总 DS 所有模型的 token 数，覆盖 monthlyTotals
     let dsInput = 0, dsOutput = 0, dsCacheRead = 0, dsCacheCreate = 0;
     for (const m of dsBreakdown) {
       dsInput += m.input;
@@ -668,60 +883,58 @@ export async function buildStatsMessage(workspaceRoot: string): Promise<StatsMes
       dsCacheRead += m.cacheRead;
       dsCacheCreate += m.cacheCreate;
     }
-    monthlyTotals.input = dsInput;
-    monthlyTotals.output = dsOutput;
-    monthlyTotals.cacheRead = dsCacheRead;
-    monthlyTotals.cacheCreate = dsCacheCreate;
-    monthlyTotals.totalTokens = dsInput + dsOutput + dsCacheRead + dsCacheCreate;
-    monthlyTotals.cost = ds.totalCost;
+    monthlyTotals = {
+      input: dsInput,
+      output: dsOutput,
+      cacheRead: dsCacheRead,
+      cacheCreate: dsCacheCreate,
+      totalTokens: dsInput + dsOutput + dsCacheRead + dsCacheCreate,
+      cost: ds.totalCost,
+    };
     monthlyModelBreakdown = dsBreakdown;
     monthlyOtherCost = 0;
     monthlyGlobalCost = ds.totalCost;
-    // 用 DS 每日数据覆盖"今日消耗"（取最新有数据的日期）
+    balance = ds.balance || 0;
+
     if (ds.days) {
       const dsDates = Object.keys(ds.days).sort();
       const latestDate = dsDates[dsDates.length - 1];
       if (latestDate) {
         today = dsDayToEntry(latestDate, ds.days[latestDate]);
+        const todayStr = new Date().toISOString().slice(0, 10);
         if (today && today.date !== todayStr) today = null;
       }
     }
   }
 
-  // 合并 DS 历史月份每日数据到 allDays（DS 平台真实账单优先，本地 JSONL 补充）
+  // 合并 DS 历史月份每日数据
   const dsHistoryDays = loadDSHistoryDays(home);
   const dsDateSet = new Set(Object.keys(dsHistoryDays));
-  // 移除本地数据中 DS 已覆盖的日期，用 DS 数据替换
-  entries = entries.filter(e => !dsDateSet.has(e.date));
+  allDays = allDays.filter(e => !dsDateSet.has(e.date));
   for (const [date, dm] of Object.entries(dsHistoryDays)) {
-    entries.push(dsDayToEntry(date, dm));
+    allDays.push(dsDayToEntry(date, dm));
   }
-  entries.sort((a, b) => a.date.localeCompare(b.date));
+  allDays.sort((a, b) => a.date.localeCompare(b.date));
 
-  const hasData = entries.length > 0 && entries.some(e => e.totalTokens > 0);
+  const hasData = allDays.length > 0 && allDays.some(e => e.totalTokens > 0);
 
-  // 余额预警：从配置文件读取，未设置默认 10 元
-  let balanceThreshold = 10;
+  // 余额阈值（重新读，可能已变更）
+  let balanceThreshold = base.balanceThreshold;
   try {
     const authRaw = fs.readFileSync(path.join(home, '.claude', 'deepseek_auth.json'), 'utf-8');
     const auth = JSON.parse(authRaw);
     if (typeof auth.balanceThreshold === 'number' && auth.balanceThreshold > 0) {
       balanceThreshold = auth.balanceThreshold;
     }
-  } catch { /* 配置文件不存在或格式错误，用默认值 */ }
-  const balance = ds?.balance || 0;
+  } catch { /* 保持旧值 */ }
+
   const overThreshold = (balance > 0 && balance < balanceThreshold);
 
   return {
-    type: 'update',
-    status: hasData ? 'ok' : 'empty',
+    ...base,
+    status: hasData ? 'ok' : (base.status === 'ok' ? 'ok' : 'empty'),
     today,
-    allDays: entries,
-    totals: result?.totals || { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, totalTokens: 0, cost: 0 },
-    mcpServers: getMcpServers(workspaceRoot),
-    memoryFiles: getMemoryFiles(workspaceRoot),
-    projectFiles: getProjectFiles(workspaceRoot),
-    skills: getSkills(workspaceRoot),
+    allDays,
     modelBreakdown: globalModelBreakdown,
     globalCost,
     otherCost,
@@ -729,13 +942,16 @@ export async function buildStatsMessage(workspaceRoot: string): Promise<StatsMes
     monthlyModelBreakdown,
     monthlyOtherCost,
     monthlyGlobalCost,
-    workspaceRoot,
-    home,
-    projectSlug: workspaceRoot.replace(/[^a-zA-Z0-9]/g, '-'),
     balance,
     overThreshold,
     balanceThreshold,
   };
+}
+
+export async function buildStatsMessage(workspaceRoot: string): Promise<StatsMessage> {
+  // recentDays=0 → 全量扫描（用于导出 CSV / 手动刷新）
+  const quick = buildQuickMessage(workspaceRoot, 0);
+  return enrichMessage(workspaceRoot, quick);
 }
 
 export function startAutoRefresh(
@@ -745,11 +961,43 @@ export function startAutoRefresh(
 ): () => void {
   let cancelled = false;
   let timer: NodeJS.Timeout | null = null;
+  let isFirstTick = true;
+
   const tick = async () => {
     if (cancelled) return;
     try {
-      const msg = await buildStatsMessage(workspaceRoot);
-      if (!cancelled) callback(msg);
+      if (isFirstTick) {
+        // 首屏快速消息（同步，<200ms）
+        const quickMsg = buildQuickMessage(workspaceRoot);
+        if (!cancelled) {
+          // 写入缓存供后续 tick 使用
+          cacheSet(_quickCache, workspaceRoot, quickMsg);
+          callback(quickMsg);
+        }
+        // 异步丰富（其他项目 + Hermes + DS 平台）
+        const fullMsg = await enrichMessage(workspaceRoot, quickMsg);
+        if (!cancelled) {
+          cacheSet(_fullCache, workspaceRoot, fullMsg);
+          callback(fullMsg);
+        }
+        isFirstTick = false;
+      } else {
+        // 后续 tick：优先走缓存
+        const fullCached = cacheGet(_fullCache, workspaceRoot, FULL_CACHE_TTL);
+        if (fullCached) {
+          if (!cancelled) callback(fullCached);
+        } else {
+          // 缓存过期，重新完整构建
+          const quickMsg = buildQuickMessage(workspaceRoot);
+          cacheSet(_quickCache, workspaceRoot, quickMsg);
+          if (!cancelled) callback(quickMsg);
+          const fullMsg = await enrichMessage(workspaceRoot, quickMsg);
+          if (!cancelled) {
+            cacheSet(_fullCache, workspaceRoot, fullMsg);
+            callback(fullMsg);
+          }
+        }
+      }
     } catch (e) {
       console.error('[vscode-cc-deepseek-stats] 自动刷新失败:', e);
     }
