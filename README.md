@@ -24,14 +24,6 @@ vscode-cc-deepseek-stats — Claude Code 的 DeepSeek 平台用量实时统计�
 4. 点击 **历史** 标签查看每日 / 每月消耗明细，顶部按钮导出 CSV
 5. 点击 Memory 文件名可在编辑器中打开
 
-### 命令
-
-| 命令 | 说明 |
-|------|------|
-| `CC DeepSeek: 刷新数据` | 手动刷新面板数据 |
-| `CC DeepSeek: 打开面板` | 打开/切换到侧边面板 |
-| `CC DeepSeek: 导出 CSV` | 导出所有历史消耗为 CSV 文件 |
-
 > **说明：** Token 统计数据来自 Claude Code 和 DeepSeek 平台 API。费用计算和账户余额功能针对 DeepSeek 平台优化。
 
 ## 已知问题
@@ -70,14 +62,6 @@ vscode-cc-deepseek-stats — Real-time DeepSeek usage statistics panel for Claud
 3. Click the **Skills** tab to browse installed skills, click to see descriptions
 4. Click the **History** tab for daily / monthly breakdowns, use the export button
 5. Click any memory filename to open it in the editor
-
-### Commands
-
-| Command | Description |
-|------|------|
-| `CC DeepSeek: Refresh` | Manually refresh panel data |
-| `CC DeepSeek: Open Panel` | Open/switch to the sidebar panel |
-| `CC DeepSeek: Export CSV` | Export all history to CSV |
 
 > **Note:** Token statistics come from Claude Code and the DeepSeek platform API. Cost calculation and balance features are optimized for DeepSeek.
 
