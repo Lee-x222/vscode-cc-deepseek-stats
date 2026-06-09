@@ -16,12 +16,27 @@
   "homepage": "https://github.com/Lee-x222/vscode-cc-deepseek-stats#readme",
   "keywords": [
     "claude",
+    "claude code",
     "claude-code",
+    "cc",
+    "deepseek",
+    "deep seek",
+    "deep-seek",
     "token",
     "cost",
-    "deepseek",
-    "api-key",
-    "balance"
+    "usage",
+    "stats",
+    "statistics",
+    "monitor",
+    "dashboard",
+    "tracker",
+    "panel",
+    "sidebar",
+    "balance",
+    "api",
+    "cache",
+    "pricing",
+    "deepseek-stats"
   ],
   "engines": {
     "vscode": "^1.80.0"
