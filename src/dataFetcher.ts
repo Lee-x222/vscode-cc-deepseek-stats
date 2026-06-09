@@ -530,7 +530,9 @@ export function getMcpServers(workspaceRoot: string): string[] {
 export async function buildStatsMessage(workspaceRoot: string): Promise<StatsMessage> {
   const result = fetchCcUsage(workspaceRoot);
   let entries: DailyEntry[] = result?.entries || [];
-  let today = entries[entries.length - 1] || null;
+  let today: DailyEntry | null = entries[entries.length - 1] || null;
+  const todayStr = new Date().toISOString().slice(0, 10);
+  if (today && today.date !== todayStr) today = null;
 
   // 本月汇总：用 UTC 月份，与 DeepSeek 官网一致
   const now = new Date();
@@ -681,6 +683,7 @@ export async function buildStatsMessage(workspaceRoot: string): Promise<StatsMes
       const latestDate = dsDates[dsDates.length - 1];
       if (latestDate) {
         today = dsDayToEntry(latestDate, ds.days[latestDate]);
+        if (today && today.date !== todayStr) today = null;
       }
     }
   }

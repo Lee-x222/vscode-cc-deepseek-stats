@@ -754,15 +754,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       margin-bottom: 12px;
     }
 
-    /* ====== 内容淡入 ====== */
-    @keyframes fadeIn {
-      from { opacity: 0; }
-      to { opacity: 1; }
-    }
-    .stat-card.updated {
-      animation: fadeIn 0.3s ease;
-    }
-
     /* ====== 加载/错误状态 ====== */
     .loading {
       text-align: center;
@@ -1111,9 +1102,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     document.getElementById('total-sub-all').textContent = formatNum(mon.totalTokens || 0) + ' tokens';
     document.getElementById('model-list-all').innerHTML = renderModels(msg.monthlyModelBreakdown || msg.modelBreakdown || []);
 
-    // 淡入动画
-    card.classList.add('updated');
-    setTimeout(function() { card.classList.remove('updated'); }, 300);
   }
 
   function setStat(id, val, barBase) {
