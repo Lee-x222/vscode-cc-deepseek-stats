@@ -7,9 +7,7 @@ import { CcUsageResult, DailyEntry, ModelCost, StatsMessage } from './types';
 const REFRESH_INTERVAL = 30_000;
 
 // ====== 缓存层 ======
-const _quickCache = new Map<string, { data: StatsMessage; ts: number }>();
 const _fullCache = new Map<string, { data: StatsMessage; ts: number }>();
-const QUICK_CACHE_TTL = 30_000;
 const FULL_CACHE_TTL = 120_000;
 
 let _skillsCache: { skills: { name: string; description: string }[]; ts: number } | null = null;
@@ -49,6 +47,18 @@ interface CachedLine {
   msgId: string;
 }
 const _parseFileCache = new Map<string, { mtime: number; lines: CachedLine[] }>();
+const MAX_PARSE_CACHE_SIZE = 1000;
+
+/** Map 超过上限时清掉最旧的一半条目，防止长期运行内存泄漏 */
+function trimCache<K, V>(cache: Map<K, V>, maxSize: number): void {
+  if (cache.size <= maxSize) return;
+  const toDelete = Math.floor(cache.size / 2);
+  let i = 0;
+  for (const key of cache.keys()) {
+    cache.delete(key);
+    if (++i >= toDelete) break;
+  }
+}
 
 /** 从单个 JSONL 文件中提取 CachedLine[]，优先走缓存 */
 function parseOneFile(file: string): CachedLine[] {
@@ -87,6 +97,7 @@ function parseOneFile(file: string): CachedLine[] {
   }
 
   _parseFileCache.set(file, { mtime, lines });
+  trimCache(_parseFileCache, MAX_PARSE_CACHE_SIZE);
   return lines;
 }
 
@@ -144,23 +155,70 @@ function parseCSVLine(line: string): string[] {
   return result;
 }
 
-function collectJsonlFiles(dir: string): string[] {
-  const results: string[] = [];
-  try {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        results.push(...collectJsonlFiles(full));
-      } else if (entry.name.endsWith('.jsonl')) {
-        results.push(full);
-      }
-    }
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
-      console.error('[vscode-cc-deepseek-stats] collectJsonlFiles 错误:', e);
+/** 将单条使用记录聚合到 dayMap / modelMap / dayModelMap（parseAll & parseHermes 共用） */
+function addUsageToMaps(
+  date: string, input: number, output: number, cacheCreate: number, cacheRead: number,
+  model: string, agent: string,
+  dayMap: Map<string, DailyEntry>,
+  modelMap: Map<string, ModelCost>,
+  dayModelMap: Map<string, Map<string, ModelCost>>,
+): void {
+  const p = PRICING[model] || PRICING['deepseek-v4-pro'];
+  const cost = (input + cacheCreate) / 1e6 * p.in + output / 1e6 * p.out + cacheRead / 1e6 * p.cache;
+
+  // 按日期聚合
+  const day = dayMap.get(date);
+  if (day) {
+    day.input += input; day.output += output;
+    day.cacheCreate += cacheCreate; day.cacheRead += cacheRead;
+    day.totalTokens += input + output + cacheCreate + cacheRead;
+    day.cost += cost;
+    if (model && !day.models.includes(model)) day.models.push(model);
+  } else {
+    dayMap.set(date, {
+      date, agent, models: model ? [model] : [],
+      input, output, cacheCreate, cacheRead,
+      totalTokens: input + output + cacheCreate + cacheRead, cost,
+      modelBreakdown: [],
+    });
+  }
+
+  // 按日期+模型
+  let dm = dayModelMap.get(date);
+  if (!dm) { dm = new Map(); dayModelMap.set(date, dm); }
+  const dmb = dm.get(model);
+  if (dmb) {
+    dmb.input += input; dmb.output += output;
+    dmb.cacheCreate += cacheCreate; dmb.cacheRead += cacheRead;
+    dmb.cost += cost;
+  } else {
+    dm.set(model, { model, input, output, cacheRead, cacheCreate, cost });
+  }
+
+  // 全量模型
+  const mb = modelMap.get(model);
+  if (mb) {
+    mb.input += input; mb.output += output;
+    mb.cacheCreate += cacheCreate; mb.cacheRead += cacheRead;
+    mb.cost += cost;
+  } else {
+    modelMap.set(model, { model, input, output, cacheRead, cacheCreate, cost });
+  }
+}
+
+/** 把 dayModelMap 中的分模型数据挂到 dayMap 的每个 entry 上 */
+function attachModelBreakdowns(
+  dayMap: Map<string, DailyEntry>,
+  dayModelMap: Map<string, Map<string, ModelCost>>,
+): void {
+  for (const [date, dm] of dayModelMap) {
+    const entry = dayMap.get(date);
+    if (entry) {
+      entry.modelBreakdown = Array.from(dm.values())
+        .filter(m => m.input > 0 || m.output > 0)
+        .sort((a, b) => b.cost - a.cost);
     }
   }
-  return results;
 }
 
 function parseAll(dir: string, recentDays = 0): {
@@ -170,81 +228,21 @@ function parseAll(dir: string, recentDays = 0): {
   const dayMap = new Map<string, DailyEntry>();
   const modelMap = new Map<string, ModelCost>();
   const dayModelMap = new Map<string, Map<string, ModelCost>>();
-
   const seenIds = new Set<string>();
 
   const files = recentDays > 0
     ? collectRecentJsonlFiles(dir, recentDays)
-    : collectJsonlFiles(dir);
+    : collectRecentJsonlFiles(dir, 0);
 
   for (const file of files) {
-    // 优先走文件级缓存（mtime 未变则跳过 readFileSync + JSON.parse）
     for (const cl of parseOneFile(file)) {
-      const input = cl.input;
-      const output = cl.output;
-      const cc = cl.cacheCreate;
-      const cr = cl.cacheRead;
-      const model = cl.model;
-      const date = cl.date;
-      const msgId = cl.msgId;
-
-      if (msgId && seenIds.has(msgId)) continue;
-      if (msgId) seenIds.add(msgId);
-
-      const p = PRICING[model] || PRICING['deepseek-v4-pro'];
-      const cost = (input + cc) / 1e6 * p.in + output / 1e6 * p.out + cr / 1e6 * p.cache;
-
-      // 按日期聚合
-      const day = dayMap.get(date);
-      if (day) {
-        day.input += input; day.output += output;
-        day.cacheCreate += cc; day.cacheRead += cr;
-        day.totalTokens += input + output + cc + cr;
-        day.cost += cost;
-        if (model && !day.models.includes(model)) day.models.push(model);
-      } else {
-        dayMap.set(date, {
-          date, agent: 'claude', models: model ? [model] : [],
-          input, output, cacheCreate: cc, cacheRead: cr,
-          totalTokens: input + output + cc + cr, cost,
-          modelBreakdown: [],
-        });
-      }
-
-      // 按日期+模型聚合
-      let dm = dayModelMap.get(date);
-      if (!dm) { dm = new Map(); dayModelMap.set(date, dm); }
-      const dmb = dm.get(model);
-      if (dmb) {
-        dmb.input += input; dmb.output += output;
-        dmb.cacheCreate += cc; dmb.cacheRead += cr;
-        dmb.cost += cost;
-      } else {
-        dm.set(model, { model, input, output, cacheRead: cr, cacheCreate: cc, cost });
-      }
-
-      // 全部模型聚合
-      const mb = modelMap.get(model);
-      if (mb) {
-        mb.input += input; mb.output += output;
-        mb.cacheCreate += cc; mb.cacheRead += cr;
-        mb.cost += cost;
-      } else {
-        modelMap.set(model, { model, input, output, cacheRead: cr, cacheCreate: cc, cost });
-      }
+      if (cl.msgId && seenIds.has(cl.msgId)) continue;
+      if (cl.msgId) seenIds.add(cl.msgId);
+      addUsageToMaps(cl.date, cl.input, cl.output, cl.cacheCreate, cl.cacheRead, cl.model, 'claude', dayMap, modelMap, dayModelMap);
     }
   }
 
-  // 把每天的分模型数据挂到对应 entry 上
-  for (const [date, dm] of dayModelMap) {
-    const entry = dayMap.get(date);
-    if (entry) {
-      entry.modelBreakdown = Array.from(dm.values())
-        .filter(m => m.input > 0 || m.output > 0)
-        .sort((a, b) => b.cost - a.cost);
-    }
-  }
-
+  attachModelBreakdowns(dayMap, dayModelMap);
   return { dayMap, modelMap };
 }
 
@@ -277,47 +275,7 @@ async function parseHermes(home: string): Promise<{
       if (startedAt === 0) continue;
 
       const date = new Date(startedAt * 1000).toISOString().slice(0, 10);
-      const p = PRICING[model] || PRICING['deepseek-v4-pro'];
-      const cost = (input + cacheWrite) / 1e6 * p.in + output / 1e6 * p.out + cacheRead / 1e6 * p.cache;
-
-      // 按日期聚合
-      const day = dayMap.get(date);
-      if (day) {
-        day.input += input; day.output += output;
-        day.cacheCreate += cacheWrite; day.cacheRead += cacheRead;
-        day.totalTokens += input + output + cacheWrite + cacheRead;
-        day.cost += cost;
-        if (model && !day.models.includes(model)) day.models.push(model);
-      } else {
-        dayMap.set(date, {
-          date, agent: 'hermes', models: model ? [model] : [],
-          input, output, cacheCreate: cacheWrite, cacheRead,
-          totalTokens: input + output + cacheWrite + cacheRead, cost,
-          modelBreakdown: [],
-        });
-      }
-
-      // 按日期+模型聚合
-      let dm = dayModelMap.get(date);
-      if (!dm) { dm = new Map(); dayModelMap.set(date, dm); }
-      const dmb = dm.get(model);
-      if (dmb) {
-        dmb.input += input; dmb.output += output;
-        dmb.cacheCreate += cacheWrite; dmb.cacheRead += cacheRead;
-        dmb.cost += cost;
-      } else {
-        dm.set(model, { model, input, output, cacheRead, cacheCreate: cacheWrite, cost });
-      }
-
-      // 全部模型聚合
-      const mb = modelMap.get(model);
-      if (mb) {
-        mb.input += input; mb.output += output;
-        mb.cacheCreate += cacheWrite; mb.cacheRead += cacheRead;
-        mb.cost += cost;
-      } else {
-        modelMap.set(model, { model, input, output, cacheRead, cacheCreate: cacheWrite, cost });
-      }
+      addUsageToMaps(date, input, output, cacheWrite, cacheRead, model, 'hermes', dayMap, modelMap, dayModelMap);
     }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -325,16 +283,7 @@ async function parseHermes(home: string): Promise<{
     }
   }
 
-  // 把每天的分模型数据挂到对应 entry 上
-  for (const [date, dm] of dayModelMap) {
-    const entry = dayMap.get(date);
-    if (entry) {
-      entry.modelBreakdown = Array.from(dm.values())
-        .filter(m => m.input > 0 || m.output > 0)
-        .sort((a, b) => b.cost - a.cost);
-    }
-  }
-
+  attachModelBreakdowns(dayMap, dayModelMap);
   return { dayMap, modelMap };
 }
 
@@ -675,7 +624,11 @@ function getProjectFilesCached(workspaceRoot: string): string[] {
 
 /** 构建轻量级 StatsMessage — 只解析当前项目 JSONL + 缓存读其他数据，<200ms */
 export function buildQuickMessage(workspaceRoot: string, recentDays = 7): StatsMessage {
-  const result = fetchCcUsage(workspaceRoot, recentDays); // 默认只扫最近 7 天的 session
+  let result = fetchCcUsage(workspaceRoot, recentDays); // 默认只扫最近 7 天的 session
+  // 月初边界兜底：recentDays 过滤后无数据时退到全量扫描
+  if (recentDays > 0 && (!result || result.entries.length === 0)) {
+    result = fetchCcUsage(workspaceRoot, 0);
+  }
   const entries = result?.entries || [];
   let today: DailyEntry | null = entries[entries.length - 1] || null;
   const todayStr = new Date().toISOString().slice(0, 10);
@@ -970,8 +923,6 @@ export function startAutoRefresh(
         // 首屏快速消息（同步，<200ms）
         const quickMsg = buildQuickMessage(workspaceRoot);
         if (!cancelled) {
-          // 写入缓存供后续 tick 使用
-          cacheSet(_quickCache, workspaceRoot, quickMsg);
           callback(quickMsg);
         }
         // 异步丰富（其他项目 + Hermes + DS 平台）
@@ -982,16 +933,12 @@ export function startAutoRefresh(
         }
         isFirstTick = false;
       } else {
-        // 后续 tick：优先走缓存
+        // 后续 tick：优先走缓存，缓存未命中做无感刷新（只发一次消息）
         const fullCached = cacheGet(_fullCache, workspaceRoot, FULL_CACHE_TTL);
         if (fullCached) {
           if (!cancelled) callback(fullCached);
         } else {
-          // 缓存过期，重新完整构建
-          const quickMsg = buildQuickMessage(workspaceRoot);
-          cacheSet(_quickCache, workspaceRoot, quickMsg);
-          if (!cancelled) callback(quickMsg);
-          const fullMsg = await enrichMessage(workspaceRoot, quickMsg);
+          const fullMsg = await buildStatsMessage(workspaceRoot);
           if (!cancelled) {
             cacheSet(_fullCache, workspaceRoot, fullMsg);
             callback(fullMsg);
