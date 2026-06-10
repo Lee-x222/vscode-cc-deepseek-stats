@@ -353,6 +353,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       color: var(--accent-yellow);
       margin-bottom: 4px;
     }
+    .setup-hint {
+      display: none;
+      font-size: 11px;
+      color: var(--accent-blue);
+      text-align: center;
+      margin-top: 6px;
+      cursor: pointer;
+      padding: 6px 10px;
+      background: rgba(59,130,246,0.1);
+      border: 1px dashed rgba(59,130,246,0.4);
+      border-radius: var(--radius-sm);
+    }
+    .setup-hint:hover { background: rgba(59,130,246,0.2); }
+    .setup-hint.show { display: block; }
     .model-list { margin-top: 6px; }
     .model-row {
       display: flex;
@@ -1051,6 +1065,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             '<span class="month-label" style="margin:0">💰 充值余额</span>' +
             '<span class="total-cost" id="account-balance" style="font-size:16px">—</span>' +
           '</div>' +
+          '<div class="setup-hint" id="setup-hint" onclick="openSettings()">💡 点击设置 API Key 解锁余额查询 →</div>' +
           '<div class="month-label">今日消耗</div>' +
           '<div class="total-cost" id="total-cost">—</div>' +
           '<div class="total-sub" id="total-sub"></div>' +
@@ -1075,6 +1090,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     // 账户余额
     document.getElementById('account-balance').textContent = '¥' + (msg.balance || 0).toFixed(2);
+    // 首次使用引导：未配 API Key 时显示设置入口
+    var setupHint = document.getElementById('setup-hint');
+    if (setupHint) {
+      if (msg.authConfigured) {
+        setupHint.classList.remove('show');
+      } else {
+        setupHint.classList.add('show');
+      }
+    }
 
     // 今日消耗
     const hitRate = promptTotal > 0 ? ((today.cacheRead || 0) / promptTotal * 100).toFixed(1) : '0';

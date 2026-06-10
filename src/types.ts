@@ -63,6 +63,8 @@ export interface StatsMessage {
   balance: number;
   /** 平台余额是否低于预警阈值 */
   overThreshold: boolean;
+  /** 是否已配置 API Key（用于首次使用引导） */
+  authConfigured: boolean;
   /** 当前生效的余额预警阈值 */
   balanceThreshold: number;
   /** 工作区根目录，WebView 用来打开文件 */

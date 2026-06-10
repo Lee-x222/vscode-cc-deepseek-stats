@@ -666,14 +666,18 @@ export function buildQuickMessage(workspaceRoot: string, recentDays = 7): StatsM
   const modelBreakdown = result?.modelBreakdown || [];
   const hasData = entries.length > 0 && entries.some(e => e.totalTokens > 0);
 
-  // 余额阈值（从配置文件读，常驻内存会变但频率低，不做缓存）
+  // 余额阈值 + API Key 检测（用于首次使用引导）
   const home = process.env.HOME || process.env.USERPROFILE || '';
   let balanceThreshold = 10;
+  let authConfigured = false;
   try {
     const authRaw = fs.readFileSync(path.join(home, '.claude', 'deepseek_auth.json'), 'utf-8');
     const auth = JSON.parse(authRaw);
     if (typeof auth.balanceThreshold === 'number' && auth.balanceThreshold > 0) {
       balanceThreshold = auth.balanceThreshold;
+    }
+    if (typeof auth.apiKey === 'string' && auth.apiKey.length > 0) {
+      authConfigured = true;
     }
   } catch { /* 用默认值 */ }
 
@@ -711,6 +715,7 @@ export function buildQuickMessage(workspaceRoot: string, recentDays = 7): StatsM
     projectSlug: workspaceRoot.replace(/[^a-zA-Z0-9]/g, '-'),
     balance,
     overThreshold,
+    authConfigured,
     balanceThreshold,
   };
 }
@@ -871,13 +876,17 @@ async function enrichMessage(workspaceRoot: string, base: StatsMessage): Promise
 
   const hasData = allDays.length > 0 && allDays.some(e => e.totalTokens > 0);
 
-  // 余额阈值（重新读，可能已变更）
+  // 余额阈值 + API Key 检测（重新读，可能已变更）
   let balanceThreshold = base.balanceThreshold;
+  let authConfigured = base.authConfigured;
   try {
     const authRaw = fs.readFileSync(path.join(home, '.claude', 'deepseek_auth.json'), 'utf-8');
     const auth = JSON.parse(authRaw);
     if (typeof auth.balanceThreshold === 'number' && auth.balanceThreshold > 0) {
       balanceThreshold = auth.balanceThreshold;
+    }
+    if (typeof auth.apiKey === 'string' && auth.apiKey.length > 0) {
+      authConfigured = true;
     }
   } catch { /* 保持旧值 */ }
 
@@ -897,6 +906,7 @@ async function enrichMessage(workspaceRoot: string, base: StatsMessage): Promise
     monthlyGlobalCost,
     balance,
     overThreshold,
+    authConfigured,
     balanceThreshold,
   };
 }
@@ -904,7 +914,9 @@ async function enrichMessage(workspaceRoot: string, base: StatsMessage): Promise
 export async function buildStatsMessage(workspaceRoot: string): Promise<StatsMessage> {
   // recentDays=0 → 全量扫描（用于导出 CSV / 手动刷新）
   const quick = buildQuickMessage(workspaceRoot, 0);
-  return enrichMessage(workspaceRoot, quick);
+  const full = await enrichMessage(workspaceRoot, quick);
+  cacheSet(_fullCache, workspaceRoot, full); // 更新缓存，防止自动刷新吐出旧数据
+  return full;
 }
 
 export function startAutoRefresh(
