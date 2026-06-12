@@ -225,21 +225,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     /* ====== 面板内容 ====== */
     .panel-container {
       position: relative;
-      min-height: 300px;
       flex: 1;
-      overflow-y: auto;
+      min-height: 0;
+      overflow: hidden;
     }
     .panel {
       position: absolute;
-      top: 0; left: 0; right: 0;
+      top: 0; left: 0; right: 0; bottom: 0;
       opacity: 0;
       transform: translateY(8px);
       pointer-events: none;
       transition: opacity 0.25s ease, transform 0.25s ease;
       padding: 14px 12px;
+      overflow-y: auto;
     }
     .panel.active {
-      position: relative;
       opacity: 1;
       transform: translateY(0);
       pointer-events: auto;
