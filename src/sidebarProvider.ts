@@ -451,23 +451,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       font-size: 12px;
       font-style: italic;
     }
-    .mcp-toggle {
-      cursor: pointer;
-      user-select: none;
-    }
-    .mcp-toggle:hover { color: var(--text-primary); }
-    .mcp-arrow {
-      font-size: 10px;
-      transition: transform 0.2s;
-      display: inline-block;
-    }
-    .mcp-arrow.open { transform: rotate(180deg); }
     .mcp-list {
-      max-height: 60px;
-      overflow: hidden;
-      transition: max-height 0.3s ease;
+      max-height: 120px;
+      overflow-y: auto;
     }
-    .mcp-list.expanded { max-height: 2000px; }
 
     /* ====== 刷新按钮 ====== */
     .refresh-bar {
@@ -853,7 +840,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     <div class="skeleton skeleton-row" style="width:25%;margin-top:12px"></div>
   </div>
 
-  <div class="section-title mcp-toggle" onclick="toggleMcp()">🔌 MCP 服务器 <span class="mcp-arrow" id="mcp-arrow">▾</span></div>
+  <div class="section-title">🔌 MCP 服务器</div>
   <div class="mcp-list" id="mcp-list"><span class="mcp-empty">检测中…</span></div>
 </div>
 
@@ -1292,14 +1279,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         desc.style.display = desc.style.display === 'none' ? 'block' : 'none';
       }
     };
-  }
-
-  // ====== MCP 折叠 ======
-  function toggleMcp() {
-    const list = document.getElementById('mcp-list');
-    const arrow = document.getElementById('mcp-arrow');
-    list.classList.toggle('expanded');
-    arrow.classList.toggle('open');
   }
 
   // ====== MCP 面板 ======
