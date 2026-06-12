@@ -1027,25 +1027,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     if (card && card.querySelector('.skeleton')) {
       card.innerHTML =
         '<div class="stat-row">' +
-          '<span class="stat-label"><span class="dot dot-purple"></span>输入</span>' +
+          '<span class="stat-label"><span class="dot dot-purple"></span>输入（未命中缓存）</span>' +
           '<span class="stat-value" id="stat-input">—</span>' +
         '</div>' +
         '<div class="bar-wrap"><div class="bar-fill bar-purple" id="bar-input" style="width:0%"></div></div>' +
+        '<div class="stat-row" style="margin-top:8px">' +
+          '<span class="stat-label"><span class="dot dot-blue"></span>输入（命中缓存）</span>' +
+          '<span class="stat-value" id="stat-cache-read">—</span>' +
+        '</div>' +
+        '<div class="bar-wrap"><div class="bar-fill bar-blue" id="bar-cache-read" style="width:0%"></div></div>' +
         '<div class="stat-row" style="margin-top:8px">' +
           '<span class="stat-label"><span class="dot dot-orange"></span>输出</span>' +
           '<span class="stat-value" id="stat-output">—</span>' +
         '</div>' +
         '<div class="bar-wrap"><div class="bar-fill bar-orange" id="bar-output" style="width:0%"></div></div>' +
-        '<div class="stat-row" style="margin-top:8px">' +
-          '<span class="stat-label"><span class="dot dot-blue"></span>缓存读取</span>' +
-          '<span class="stat-value" id="stat-cache-read">—</span>' +
-        '</div>' +
-        '<div class="bar-wrap"><div class="bar-fill bar-blue" id="bar-cache-read" style="width:0%"></div></div>' +
-        '<div class="stat-row" style="margin-top:8px">' +
-          '<span class="stat-label"><span class="dot dot-green"></span>缓存写入</span>' +
-          '<span class="stat-value" id="stat-cache-create">—</span>' +
-        '</div>' +
-        '<div class="bar-wrap"><div class="bar-fill bar-green" id="bar-cache-create" style="width:0%"></div></div>' +
         '<div class="total-section">' +
           '<div class="total-hint" id="total-hint" style="display:none">⚠ 当前会话数据尚未计入</div>' +
           '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">' +
@@ -1067,13 +1062,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     // 进度条：用今日数据
     const today = msg.today || { input: 0, output: 0, cacheRead: 0, cacheCreate: 0, totalTokens: 0, cost: 0 };
-    const promptTotal = (today.input || 0) + (today.cacheRead || 0) + (today.cacheCreate || 0);
+    const missInput = (today.input || 0) + (today.cacheCreate || 0);
+    const promptTotal = missInput + (today.cacheRead || 0);
     const barBase = Math.max(promptTotal, today.output || 0, 1);
 
-    setStat('input', today.input || 0, barBase);
-    setStat('output', today.output || 0, barBase);
+    setStat('input', missInput, barBase);
     setStat('cache-read', today.cacheRead || 0, barBase);
-    setStat('cache-create', today.cacheCreate || 0, barBase);
+    setStat('output', today.output || 0, barBase);
 
     // 账户余额
     document.getElementById('account-balance').textContent = '¥' + (msg.balance || 0).toFixed(2);
@@ -1158,9 +1153,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       const totalTokens = allMonthDays.reduce(function(s, d) { return s + (d.totalTokens || 0); }, 0);
 
       const dayCards = allMonthDays.slice().reverse().map(function(d) {
-        const input = formatNum(d.input);
+        const miss = formatNum(d.input + d.cacheCreate);
+        const hit = formatNum(d.cacheRead);
         const output = formatNum(d.output);
-        const cache = formatNum(d.cacheRead);
         const cost = '¥' + (d.cost || 0).toFixed(2);
         return '<div class="day-card">' +
           '<div class="day-header">' +
@@ -1168,9 +1163,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             '<span class="day-cost">' + cost + '</span>' +
           '</div>' +
           '<div class="day-detail">' +
-            '<span><span class="tok-label">输入</span>' + input + '</span>' +
+            '<span><span class="tok-label">未命中</span>' + miss + '</span>' +
+            '<span><span class="tok-label">命中</span>' + hit + '</span>' +
             '<span><span class="tok-label">输出</span>' + output + '</span>' +
-            '<span><span class="tok-label">缓存</span>' + cache + '</span>' +
           '</div>' +
         '</div>';
       }).join('');
