@@ -35,6 +35,18 @@ export interface CcUsageResult {
   modelBreakdown: ModelCost[];
 }
 
+/** MCP 服务器在线状态 */
+export type McpServerStatus = 'online' | 'offline' | 'unknown';
+
+/** MCP 服务器信息（含连通性状态） */
+export interface McpServerInfo {
+  name: string;
+  type?: string;     // 'sse' | 'stdio'
+  url?: string;      // SSE 服务器端点
+  command?: string;  // stdio 可执行文件
+  status: McpServerStatus;
+}
+
 /** 发送给 WebView 的消息 */
 export interface StatsMessage {
   type: 'update';
@@ -43,7 +55,7 @@ export interface StatsMessage {
   today: DailyEntry | null;
   allDays: DailyEntry[];
   totals: CcUsageResult['totals'];
-  mcpServers: string[];
+  mcpServers: McpServerInfo[];
   memoryFiles: string[];
   projectFiles: string[];
   modelBreakdown: ModelCost[];

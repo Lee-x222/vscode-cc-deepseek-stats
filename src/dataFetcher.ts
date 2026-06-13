@@ -1,8 +1,9 @@
 import * as path from 'path';
 import * as fs from 'fs';
+import * as net from 'net';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { CcUsageResult, DailyEntry, ModelCost, StatsMessage } from './types';
+import { CcUsageResult, DailyEntry, ModelCost, McpServerInfo, McpServerStatus, StatsMessage } from './types';
 
 const REFRESH_INTERVAL = 30_000;
 
@@ -13,8 +14,11 @@ const FULL_CACHE_TTL = 120_000;
 let _skillsCache: { skills: { name: string; description: string }[]; ts: number } | null = null;
 const SKILLS_CACHE_TTL = 600_000;  // 技能列表 10 分钟内不变
 
-const _mcpCache = new Map<string, { data: string[]; ts: number }>();
+const _mcpCache = new Map<string, { data: McpServerInfo[]; ts: number }>();
 const MCP_CACHE_TTL = 300_000;
+
+const _mcpHealthCache = new Map<string, { data: McpServerStatus; ts: number }>();
+const MCP_HEALTH_CACHE_TTL = 60_000;  // 健康检查结果 60 秒有效
 
 const _memCache = new Map<string, { data: string[]; ts: number }>();
 const MEM_CACHE_TTL = 300_000;
@@ -543,9 +547,9 @@ export function getProjectFiles(workspaceRoot: string): string[] {
   } catch { /* 目录不存在 */ return []; }
 }
 
-export function getMcpServers(workspaceRoot: string): string[] {
+export function getMcpServers(workspaceRoot: string): McpServerInfo[] {
   const home = process.env.HOME || process.env.USERPROFILE || '';
-  const servers = new Set<string>();
+  const serverMap = new Map<string, McpServerInfo>();
 
   // 检查多个配置来源
   const sources = [
@@ -558,15 +562,44 @@ export function getMcpServers(workspaceRoot: string): string[] {
   for (const p of sources) {
     try {
       const cfg = JSON.parse(fs.readFileSync(p, 'utf-8'));
-      if (cfg.mcpServers) {
-        Object.keys(cfg.mcpServers).forEach(s => servers.add(s));
+
+      // 完整 server config（mcp.json / .mcp.json）
+      if (cfg.mcpServers && typeof cfg.mcpServers === 'object') {
+        for (const [name, serverCfg] of Object.entries(cfg.mcpServers)) {
+          if (serverCfg && typeof serverCfg === 'object') {
+            const sc = serverCfg as any;
+            // 推断 type：无 type 字段时按 url/command 自动判断
+            const inferredType = sc.type || (sc.url ? 'sse' : sc.command ? 'stdio' : undefined);
+            // 尝试读取缓存的健康状态
+            const healthKey = `${workspaceRoot}::${name}`;
+            const cachedHealth = cacheGet(_mcpHealthCache, healthKey, MCP_HEALTH_CACHE_TTL);
+            serverMap.set(name, {
+              name,
+              type: inferredType,
+              url: sc.url || undefined,
+              command: sc.command || undefined,
+              status: cachedHealth || 'unknown',
+            });
+          }
+        }
       }
-      if (cfg.mcp) {
-        Object.keys(cfg.mcp).forEach(s => servers.add(s));
+
+      // 旧版 mcp 字段（部分 settings 文件）
+      if (cfg.mcp && typeof cfg.mcp === 'object') {
+        for (const name of Object.keys(cfg.mcp)) {
+          if (!serverMap.has(name)) {
+            serverMap.set(name, { name, status: 'unknown' });
+          }
+        }
       }
+
       // settings.local.json 用 enabledMcpjsonServers 数组
       if (cfg.enabledMcpjsonServers) {
-        cfg.enabledMcpjsonServers.forEach((s: string) => servers.add(s));
+        for (const s of (cfg.enabledMcpjsonServers as string[])) {
+          if (!serverMap.has(s)) {
+            serverMap.set(s, { name: s, status: 'unknown' });
+          }
+        }
       }
     } catch { /* 配置文件不存在或格式错误 */ }
   }
@@ -574,11 +607,13 @@ export function getMcpServers(workspaceRoot: string): string[] {
   // 检测项目级 codegraph（.codegraph/ 目录存在即认为已注册）
   try {
     if (fs.statSync(path.join(workspaceRoot, '.codegraph')).isDirectory()) {
-      servers.add('codegraph');
+      if (!serverMap.has('codegraph')) {
+        serverMap.set('codegraph', { name: 'codegraph', type: 'stdio', status: 'unknown' });
+      }
     }
   } catch { /* .codegraph 目录不存在 */ }
 
-  return Array.from(servers);
+  return Array.from(serverMap.values());
 }
 
 // ====== 带缓存的辅助读取函数（避免每次刷新都读文件） ======
@@ -593,12 +628,98 @@ function getSkillsCached(workspaceRoot: string): { name: string; description: st
   return skills;
 }
 
-function getMcpServersCached(workspaceRoot: string): string[] {
+function getMcpServersCached(workspaceRoot: string): McpServerInfo[] {
   const key = workspaceRoot;
   const hit = cacheGet(_mcpCache, key, MCP_CACHE_TTL);
   if (hit) return hit;
   const servers = getMcpServers(workspaceRoot);
   cacheSet(_mcpCache, key, servers);
+  return servers;
+}
+
+// ====== MCP 健康检查 ======
+
+/** TCP connect 检测 SSE 服务器连通性，超时 timeoutMs ms */
+async function checkSseHealth(url: string, timeoutMs = 3000): Promise<McpServerStatus> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return 'offline';  // URL 格式错误
+  }
+  const host = parsed.hostname;
+  const port = parseInt(parsed.port) || (parsed.protocol === 'https:' ? 443 : 80);
+
+  return new Promise((resolve) => {
+    const sock = new net.Socket();
+    let settled = false;
+    const done = (status: McpServerStatus) => {
+      if (settled) return;
+      settled = true;
+      sock.destroy();
+      resolve(status);
+    };
+
+    sock.setTimeout(timeoutMs);
+    sock.on('connect', () => done('online'));
+    sock.on('timeout', () => done('offline'));
+    sock.on('error', () => done('offline'));
+
+    sock.connect(port, host);
+  });
+}
+
+/** 检测 stdio 命令是否可执行（仅检查文件是否存在） */
+async function checkStdioHealth(command: string): Promise<McpServerStatus> {
+  // npx/node/python 是系统工具，假定可用
+  if (command === 'npx' || command === 'npm' || command === 'node' ||
+      command === 'python' || command === 'python3') {
+    return 'online';
+  }
+
+  // 绝对路径：检查文件是否存在
+  if (path.isAbsolute(command)) {
+    try {
+      await fs.promises.access(command, fs.constants.X_OK);
+      return 'online';   // 文件存在，假定可工作
+    } catch {
+      return 'offline';  // 可执行文件不存在，配置错误
+    }
+  }
+
+  // 其他裸命令：无法可靠检测
+  return 'unknown';
+}
+
+/** 并行健康检查所有 MCP 服务器，结果写入缓存 */
+async function enrichMcpHealth(workspaceRoot: string, servers: McpServerInfo[]): Promise<McpServerInfo[]> {
+  const checks = servers.map(async (srv) => {
+    const healthKey = `${workspaceRoot}::${srv.name}`;
+    const cached = cacheGet(_mcpHealthCache, healthKey, MCP_HEALTH_CACHE_TTL);
+    if (cached) {
+      srv.status = cached;
+      return srv;
+    }
+
+    let newStatus: McpServerStatus = 'unknown';
+    if (srv.type === 'sse' && srv.url) {
+      newStatus = await checkSseHealth(srv.url);
+    } else if (srv.type === 'stdio' && srv.command) {
+      newStatus = await checkStdioHealth(srv.command);
+    }
+    // 无 type 字段的兜底：有 url 按 sse，有 command 按 stdio
+    else if (srv.url) {
+      newStatus = await checkSseHealth(srv.url);
+    } else if (srv.command) {
+      newStatus = await checkStdioHealth(srv.command);
+    }
+
+    srv.status = newStatus;
+    cacheSet(_mcpHealthCache, healthKey, newStatus);
+    return srv;
+  });
+
+  await Promise.allSettled(checks);
   return servers;
 }
 
@@ -892,6 +1013,12 @@ async function enrichMessage(workspaceRoot: string, base: StatsMessage): Promise
 
   const overThreshold = (balance > 0 && balance < balanceThreshold);
 
+  // MCP 健康检查（异步，不阻塞首屏 — 首屏已通过 buildQuickMessage 显示灰色圆点）
+  let enrichedMcpServers = base.mcpServers;
+  if (enrichedMcpServers && enrichedMcpServers.length > 0) {
+    enrichedMcpServers = await enrichMcpHealth(workspaceRoot, enrichedMcpServers);
+  }
+
   return {
     ...base,
     status: hasData ? 'ok' : (base.status === 'ok' ? 'ok' : 'empty'),
@@ -904,6 +1031,7 @@ async function enrichMessage(workspaceRoot: string, base: StatsMessage): Promise
     monthlyModelBreakdown,
     monthlyOtherCost,
     monthlyGlobalCost,
+    mcpServers: enrichedMcpServers,
     balance,
     overThreshold,
     authConfigured,

@@ -442,10 +442,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
     .mcp-badge .status-dot {
       width: 6px;
-      height: 3px;
+      height: 6px;
       border-radius: 50%;
-      background: var(--accent-green);
+      flex-shrink: 0;
     }
+    .mcp-badge .status-dot.status-online  { background: var(--accent-green); }
+    .mcp-badge .status-dot.status-offline { background: var(--accent-red); }
+    .mcp-badge .status-dot.status-unknown { background: var(--text-muted); }
     .mcp-empty {
       color: var(--text-muted);
       font-size: 12px;
@@ -1284,9 +1287,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       container.innerHTML = '<span class="mcp-empty">未配置 MCP 服务器</span>';
       return;
     }
-    container.innerHTML = servers.map(s =>
-      '<span class="mcp-badge"><span class="status-dot"></span>' + escHtml(s) + '</span>'
-    ).join('');
+    container.innerHTML = servers.map(function(s) {
+      var name = typeof s === 'string' ? s : (s.name || '');
+      var status = (typeof s === 'object' && s.status) ? s.status : 'unknown';
+      return '<span class="mcp-badge"><span class="status-dot status-' + status + '"></span>' + escHtml(name) + '</span>';
+    }).join('');
   }
 
   // ====== 工具函数 ======
