@@ -578,6 +578,7 @@ export function getMcpServers(workspaceRoot: string): McpServerInfo[] {
               type: inferredType,
               url: sc.url || undefined,
               command: sc.command || undefined,
+              args: Array.isArray(sc.args) ? sc.args as string[] : undefined,
               status: cachedHealth || 'unknown',
             });
           }
@@ -669,57 +670,133 @@ async function checkSseHealth(url: string, timeoutMs = 3000): Promise<McpServerS
   });
 }
 
-/** 检测 stdio 命令是否可执行（仅检查文件是否存在） */
-async function checkStdioHealth(command: string): Promise<McpServerStatus> {
-  // npx/node/python 是系统工具，假定可用
-  if (command === 'npx' || command === 'npm' || command === 'node' ||
-      command === 'python' || command === 'python3') {
-    return 'online';
-  }
-
-  // 绝对路径：检查文件是否存在
-  if (path.isAbsolute(command)) {
-    try {
-      await fs.promises.access(command, fs.constants.X_OK);
-      return 'online';   // 文件存在，假定可工作
-    } catch {
-      return 'offline';  // 可执行文件不存在，配置错误
+/** 从 stdio server config 提取进程检测用特征串 */
+function getSearchPattern(srv: McpServerInfo): string | null {
+  const args = srv.args;
+  if (args && args.length > 0) {
+    for (const arg of args) {
+      if (arg.startsWith('-') || arg.startsWith('--')) continue;
+      const parts = arg.replace(/\\/g, '/').split('/');
+      const last = parts[parts.length - 1];
+      const withoutExt = last.replace(/\.(js|py|mjs|cjs|ts)$/i, '');
+      if (withoutExt.length >= 4) return withoutExt;
+    }
+    const first = args.find(a => !a.startsWith('-') && !a.startsWith('--'));
+    if (first) {
+      const parts = first.replace(/\\/g, '/').split('/');
+      return parts[parts.length - 1].replace(/\.(js|py|mjs|cjs|ts)$/i, '');
     }
   }
-
-  // 其他裸命令：无法可靠检测
-  return 'unknown';
+  if (srv.command) {
+    return path.basename(srv.command).replace(/\.exe$/i, '');
+  }
+  return null;
 }
 
-/** 并行健康检查所有 MCP 服务器，结果写入缓存 */
+/** 用 PowerShell 批量检测 stdio 进程是否在运行（一次查询所有 server） */
+async function checkStdioProcesses(servers: McpServerInfo[]): Promise<Map<string, boolean>> {
+  const result = new Map<string, boolean>();
+  const stdioServers = servers.filter(s =>
+    (s.type === 'stdio' || (!s.type && s.command && !s.url)) && s.command
+  );
+
+  if (stdioServers.length === 0) return result;
+
+  const patterns: { name: string; exe: string; pattern: string }[] = [];
+  for (const srv of stdioServers) {
+    const pattern = getSearchPattern(srv);
+    if (!pattern) continue;
+    const cmdBase = path.basename(srv.command || '').toLowerCase();
+    const exe = (cmdBase === 'npx' || cmdBase === 'npm' || cmdBase === 'npx.cmd' || cmdBase === 'npm.cmd')
+      ? 'node.exe' : cmdBase.includes('.') ? cmdBase : `${cmdBase}.exe`;
+    patterns.push({ name: srv.name, exe, pattern });
+  }
+
+  if (patterns.length === 0) return result;
+
+  for (const p of patterns) result.set(p.name, false);
+
+  try {
+    const uniqueExes = [...new Set(patterns.map(p => p.exe))];
+    const filter = uniqueExes.map(e => `Name='${e}'`).join(' or ');
+    const clauses = patterns.map(p => `\$_.CommandLine -like '*${p.pattern}*'`).join(' -or ');
+
+    const psScript = `Get-CimInstance Win32_Process -Filter "${filter}" | Where-Object { ${clauses} } | ForEach-Object { \$_.CommandLine }`;
+
+    const { stdout } = await promisify(execFile)(
+      'powershell.exe', ['-NoProfile', '-Command', psScript],
+      { timeout: 8000, maxBuffer: 512 * 1024 }
+    );
+
+    const output = stdout || '';
+    for (const p of patterns) {
+      if (output.includes(p.pattern)) {
+        result.set(p.name, true);
+      }
+    }
+  } catch {
+    for (const srv of stdioServers) {
+      const cmd = srv.command!;
+      if (path.isAbsolute(cmd)) {
+        try {
+          await fs.promises.access(cmd, fs.constants.X_OK);
+          result.set(srv.name, true);
+        } catch {
+          result.set(srv.name, false);
+        }
+      } else {
+        result.set(srv.name, true);
+      }
+    }
+  }
+
+  return result;
+}
+
+/** 并行健康检查所有 MCP 服务器（SSE: TCP connect, stdio: PowerShell 进程检测） */
 async function enrichMcpHealth(workspaceRoot: string, servers: McpServerInfo[]): Promise<McpServerInfo[]> {
-  const checks = servers.map(async (srv) => {
+  // 只信任已确认的 'online' 缓存；'offline'/'unknown' 每次重新验证（进程可能刚起来）
+  const uncached: McpServerInfo[] = [];
+  for (const srv of servers) {
     const healthKey = `${workspaceRoot}::${srv.name}`;
     const cached = cacheGet(_mcpHealthCache, healthKey, MCP_HEALTH_CACHE_TTL);
-    if (cached) {
-      srv.status = cached;
+    if (cached === 'online') {
+      srv.status = 'online';  // 已确认在线，信任缓存
+    } else {
+      uncached.push(srv);     // 离线/未知/过期 → 重新检测
+    }
+  }
+
+  if (uncached.length === 0) return servers;
+
+  const processResults = await checkStdioProcesses(uncached);
+
+  const sseChecks = uncached
+    .filter(s => (s.type === 'sse' || (!s.type && s.url)) && s.url)
+    .map(async (srv) => {
+      const status = await checkSseHealth(srv.url!);
+      srv.status = status;
+      cacheSet(_mcpHealthCache, `${workspaceRoot}::${srv.name}`, status);
       return srv;
-    }
+    });
 
-    let newStatus: McpServerStatus = 'unknown';
-    if (srv.type === 'sse' && srv.url) {
-      newStatus = await checkSseHealth(srv.url);
-    } else if (srv.type === 'stdio' && srv.command) {
-      newStatus = await checkStdioHealth(srv.command);
-    }
-    // 无 type 字段的兜底：有 url 按 sse，有 command 按 stdio
-    else if (srv.url) {
-      newStatus = await checkSseHealth(srv.url);
-    } else if (srv.command) {
-      newStatus = await checkStdioHealth(srv.command);
-    }
+  // 如果所有 stdio 都离线 → 大概率是 CC 刚重启进程还没起来，标灰避免误导
+  const stdioResults = Array.from(processResults.values());
+  const allStdioOffline = stdioResults.length > 0 && stdioResults.every(v => !v);
 
-    srv.status = newStatus;
-    cacheSet(_mcpHealthCache, healthKey, newStatus);
-    return srv;
-  });
+  for (const srv of uncached) {
+    if (srv.type === 'sse' || (!srv.type && srv.url)) continue;
+    const healthKey = `${workspaceRoot}::${srv.name}`;
+    if (processResults.has(srv.name)) {
+      const online = processResults.get(srv.name);
+      srv.status = online ? 'online' : (allStdioOffline ? 'unknown' : 'offline');
+    } else {
+      srv.status = 'unknown';
+    }
+    cacheSet(_mcpHealthCache, healthKey, srv.status);
+  }
 
-  await Promise.allSettled(checks);
+  await Promise.allSettled(sseChecks);
   return servers;
 }
 

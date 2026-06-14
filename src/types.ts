@@ -44,6 +44,7 @@ export interface McpServerInfo {
   type?: string;     // 'sse' | 'stdio'
   url?: string;      // SSE 服务器端点
   command?: string;  // stdio 可执行文件
+  args?: string[];   // stdio 命令行参数（用于进程检测）
   status: McpServerStatus;
 }
 
