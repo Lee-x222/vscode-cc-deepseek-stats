@@ -7,10 +7,12 @@ vscode-cc-deepseek-stats — Claude Code 的 DeepSeek 平台用量实时统计�
 - **📊 Token 统计** — 今日输入 / 输出 / 缓存读取 / 缓存写入，带可视化进度条
 - **💰 费用追踪** — 按模型分列的今日消耗和本月累计
 - **💎 账户余额** — DeepSeek 平台实时余额 + 可配置阈值余额不足红色预警
-- **📈 缓存命中率** — 实时显示当日缓存读取命中率百分比
+- **📈 缓存命中率** — 累计 + 本轮双行对比，颜色圆点分级，趋势箭头指示
 - **📅 历史记录** — 按月份折叠查看每日消耗明细
-- **📥 CSV 导出** — 点击按钮或执行命令一键导出消耗明细
-- **🔌 MCP 服务器** — 列出当前项目配置的 MCP 服务器
+- **📊 图表** — Canvas 手绘柱状图：费用趋势(pro/flash堆叠) + Token 分布(命中/未命中/输出)，渐变色+浮窗
+- **📤 导出报告** — 自包含 HTML 图表报告，月份下拉切换，与面板配色统一
+- **📥 CSV 导出** — 一键导出每日消耗明细
+- **🔌 MCP 服务器** — 列出当前项目配置的 MCP 服务器，进程级在线状态指示（绿/红/灰）
 - **📝 记忆文件** — 列出用户 Memory 文件，点击可在编辑器中打开
 - **🛠️ 技能列表** — 列出已安装的技能，点击展开中文描述
 - **🔄 自动刷新** — 每 30 秒静默更新，不再闪白
@@ -25,11 +27,6 @@ vscode-cc-deepseek-stats — Claude Code 的 DeepSeek 平台用量实时统计�
 5. 点击 Memory 文件名可在编辑器中打开
 
 > **说明：** Token 统计数据来自 Claude Code 和 DeepSeek 平台 API。费用计算和账户余额功能针对 DeepSeek 平台优化。
-
-## 已知问题
-
-- 首次安装或无使用记录时显示空状态
-- 仅支持 DeepSeek 模型定价（v4-pro / v4-flash），其他模型显示为 unknown
 
 ## 许可
 
@@ -46,10 +43,12 @@ vscode-cc-deepseek-stats — Real-time DeepSeek usage statistics panel for Claud
 - **📊 Token Stats** — Today's input / output / cache read / cache write with progress bars
 - **💰 Cost Tracking** — Per-model cost breakdown for today and monthly totals
 - **💎 Balance** — DeepSeek platform real-time balance + configurable low-balance alert
-- **📈 Cache Hit Rate** — Real-time cache read hit rate
+- **📈 Cache Hit Rate** — Cumulative + last-turn comparison with color-coded dots
 - **📅 History** — Monthly collapsible daily breakdown
+- **📊 Charts** — Canvas-drawn bar charts: cost trend (pro/flash stacked) + Token distribution (hit/miss/output), gradients + tooltips
+- **📤 Export Report** — Self-contained HTML chart report, month selector, matching panel style
 - **📥 CSV Export** — One-click export usage data to CSV
-- **🔌 MCP Servers** — Configured MCP servers list
+- **🔌 MCP Servers** — Configured MCP servers with process-level online status (green/red/gray)
 - **📝 Memory Files** — User memory files, click to open
 - **🛠️ Skills** — Installed skills with descriptions
 - **🔄 Auto-Refresh** — Silent updates every 30 seconds, no flicker
@@ -64,11 +63,6 @@ vscode-cc-deepseek-stats — Real-time DeepSeek usage statistics panel for Claud
 5. Click any memory filename to open it in the editor
 
 > **Note:** Token statistics come from Claude Code and the DeepSeek platform API. Cost calculation and balance features are optimized for DeepSeek.
-
-## Known Issues
-
-- Empty state when no usage data exists
-- Only DeepSeek model pricing supported (v4-pro / v4-flash)
 
 ## License
 

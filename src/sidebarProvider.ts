@@ -83,6 +83,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         }
       } else if (msg.command === 'exportCSV') {
         vscode.commands.executeCommand('vscode-cc-deepseek-stats.exportCSV');
+      } else if (msg.command === 'exportChart') {
+        vscode.commands.executeCommand('vscode-cc-deepseek-stats.exportChart');
       } else if (msg.command === 'openUrl') {
         vscode.env.openExternal(vscode.Uri.parse(msg.url));
       } else if (msg.command === 'saveAuth') {
@@ -160,7 +162,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       --text-secondary: var(--vscode-descriptionForeground, #8b91a6);
       --text-muted: color-mix(in srgb, var(--vscode-descriptionForeground, #8b91a6) 60%, transparent);
       --accent-purple: #7c3aed;
-      --accent-blue: var(--vscode-focusBorder, #3b82f6);
+      --accent-blue: #3b82f6;
       --accent-green: #22c55e;
       --accent-yellow: #eab308;
       --accent-orange: #f97316;
@@ -385,6 +387,40 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       margin-top: 2px;
     }
 
+    /* ====== 缓存命中率行 ====== */
+    .hit-rate-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 4px;
+    }
+    .hit-metric {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+    .hit-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .hit-dot.high { background: #3b82f6; }
+    .hit-dot.mid  { background: var(--accent-yellow); }
+    .hit-dot.low  { background: var(--accent-red); }
+    .hit-label {
+      color: var(--text-muted);
+      font-size: 11px;
+    }
+    .hit-pct {
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+    .hit-pct.high { color: #3b82f6; }
+    .hit-pct.mid  { color: var(--accent-yellow); }
+    .hit-pct.low  { color: var(--accent-red); }
+
     /* 彩色指标圆点 */
     .dot {
       display: inline-block;
@@ -457,6 +493,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     .mcp-list {
       max-height: 120px;
       overflow-y: auto;
+    }
+
+    /* ====== 图表面板 ====== */
+    .chart-section {
+      background: var(--bg-surface);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: var(--radius-md);
+      padding: 6px 8px;
+      margin-bottom: 4px;
+      box-shadow: var(--shadow-sm), 0 1px 3px rgba(0, 0, 0, 0.25);
+    }
+    .chart-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 8px;
+    }
+    .chart-section canvas {
+      width: 100%;
+      height: auto;
+      display: block;
     }
 
     /* ====== 刷新按钮 ====== */
@@ -813,9 +870,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 <!-- 标签页栏 -->
 <div class="tabs">
   <div class="tab active" data-tab="today">今日</div>
+  <div class="tab" data-tab="charts">图表</div>
   <div class="tab" data-tab="history">历史</div>
   <div class="tab" data-tab="skills">技能</div>
-  <div class="tab" data-tab="files">文件</div>
   <div class="tab" data-tab="memory">记忆</div>
 </div>
 
@@ -848,11 +905,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 </div>
 
 
+<!-- ======= 图表面板 ======= -->
+<div id="panel-charts" class="panel">
+  <div class="refresh-bar">
+    <button class="refresh-btn" onclick="exportChart()" title="导出完整 HTML 报告（含图表）"> 导出完整报告</button>
+    <button class="refresh-btn" onclick="refreshCharts()" title="重绘图表适配宽度">⟳ 刷新</button>
+  </div>
+  <div class="chart-section">
+    <div class="chart-title">本月费用趋势 (¥)</div>
+    <canvas id="chart-cost" height="280"></canvas>
+  </div>
+  <div class="chart-section">
+    <div class="chart-title" id="token-chart-title">每日 Token 分布</div>
+    <canvas id="chart-tokens" height="280"></canvas>
+  </div>
+</div>
+
 <!-- ======= 历史面板 ======= -->
 <div id="panel-history" class="panel">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
     <div class="section-title" style="margin-bottom:0">每日统计</div>
-    <button class="refresh-btn" onclick="exportCSV()" title="导出 CSV">📥 导出</button>
+    <button class="refresh-btn" onclick="exportCSV()" title="导出 CSV">导出</button>
   </div>
   <div id="history-list"><div class="loading">加载中…</div></div>
 </div>
@@ -861,12 +934,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 <div id="panel-skills" class="panel">
   <div class="section-title">🛠️ 技能</div>
   <ul class="file-list stat-card" id="skills-list"><li class="loading">加载中…</li></ul>
-</div>
-
-<!-- ======= 文件面板 ======= -->
-<div id="panel-files" class="panel">
-  <div class="section-title">工作区文件</div>
-  <ul class="file-list stat-card" id="file-list"><li class="loading">加载中…</li></ul>
 </div>
 
 <!-- ======= 记忆面板 ======= -->
@@ -907,6 +974,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   const vscode = acquireVsCodeApi();
 
   // ====== 标签页切换 ======
+  var _lastAllDays = [];
   document.querySelectorAll('.tab').forEach(tab => {
     tab.addEventListener('click', () => {
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -914,6 +982,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       const target = tab.dataset.tab;
       document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
       document.getElementById('panel-' + target).classList.add('active');
+      // 切换到图表时重新渲染（Canvas display:none→block 可能丢失状态）
+      if (target === 'charts') {
+        setTimeout(function() { updateChartsPanel(_lastAllDays); }, 100);
+      }
     });
   });
 
@@ -992,10 +1064,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
       updateTodayPanel(msg);
       updateHistoryPanel(msg);
-      updateFilesPanel(msg);
       updateMemoryPanel(msg);
       updateSkillsPanel(msg);
       updateMcpPanel(msg);
+      _lastAllDays = msg.allDays || [];
+      updateChartsPanel(_lastAllDays);
       return;
     }
 
@@ -1054,6 +1127,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           '<div class="month-label">今日消耗</div>' +
           '<div class="total-cost" id="total-cost">—</div>' +
           '<div class="total-sub" id="total-sub"></div>' +
+          '<div class="hit-rate-row" id="hit-rate-row"></div>' +
           '<div class="model-list" id="model-list-today"></div>' +
           '<div class="divider"></div>' +
           '<div class="month-label">本月消耗</div>' +
@@ -1086,7 +1160,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
 
     // 今日消耗
-    const hitRate = promptTotal > 0 ? ((today.cacheRead || 0) / promptTotal * 100).toFixed(1) : '0';
+    const hitDenom = (today.cacheRead || 0) + (today.input || 0);
+    const cumHit = hitDenom > 0 ? (today.cacheRead || 0) / hitDenom * 100 : 0;
     var costEl = document.getElementById('total-cost');
     costEl.textContent = '¥' + (today.cost || 0).toFixed(2);
     // 余额预警
@@ -1098,7 +1173,29 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       balEl.classList.remove('cost-warn');
       balEl.title = '';
     }
-    document.getElementById('total-sub').textContent = formatNum(today.totalTokens || 0) + ' tokens · 命中 ' + hitRate + '%';
+    // Token 数量
+    document.getElementById('total-sub').textContent =
+      formatNum(today.totalTokens || 0) + ' tokens';
+    // 缓存命中率（双行 + 颜色圆点）
+    (function() {
+      var row = document.getElementById('hit-rate-row');
+      if (!row || hitDenom === 0) { if (row) row.innerHTML = ''; return; }
+      function tier(v) { return v >= 80 ? 'high' : v >= 50 ? 'mid' : 'low'; }
+      var html = '<span class="hit-metric">' +
+        '<span class="hit-dot ' + tier(cumHit) + '"></span>' +
+        '<span class="hit-label">累计命中</span>' +
+        '<span class="hit-pct ' + tier(cumHit) + '">' + fmtPct(cumHit) + '%</span>' +
+        '</span>';
+      if (msg.lastTurnHitRate != null) {
+        var last = msg.lastTurnHitRate;
+        html += '<span class="hit-metric">' +
+          '<span class="hit-dot ' + tier(last) + '"></span>' +
+          '<span class="hit-label">本轮</span>' +
+          '<span class="hit-pct ' + tier(last) + '">' + fmtPct(last) + '%</span>' +
+          '</span>';
+      }
+      row.innerHTML = html;
+    })();
     document.getElementById('model-list-today').innerHTML = renderModels(
       (msg.today && msg.today.modelBreakdown) || []
     );
@@ -1203,29 +1300,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     arrow.classList.toggle('open', isOpen);
   }
 
-  // ====== 文件面板 ======
-  function updateFilesPanel(msg) {
-    const files = msg.projectFiles || [];
-    const container = document.getElementById('file-list');
-    if (files.length === 0) {
-      container.innerHTML = '<li class="loading">未找到文件</li>';
-      return;
-    }
-    const icons = { '.md': '📝', '.py': '🐍', '.ts': '📘', '.json': '⚙️' };
-    container.innerHTML = files.map(f => {
-      const ext = '.' + f.split('.').pop();
-      const icon = icons[ext] || '📄';
-      return '<li class="file-item" data-file="' + escHtml(f) + '"><span class="file-icon">' + icon + '</span>' + escHtml(f) + '</li>';
-    }).join('');
-    // 事件委托：点击文件项打开文件
-    container.onclick = function(e) {
-      const item = e.target.closest('.file-item');
-      if (item && item.dataset.file) {
-        vscode.postMessage({ command: 'openFile', file: item.dataset.file });
-      }
-    };
-  }
-
   // ====== 记忆面板 ======
   function updateMemoryPanel(msg) {
     const files = msg.memoryFiles || [];
@@ -1302,6 +1376,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     return String(Math.floor(n));
   }
 
+  function fmtPct(v) {
+    if (!v || v <= 0) return '0';
+    if (v >= 99.95) return '100';
+    return v.toFixed(1);
+  }
+
   function escHtml(s) {
     const d = document.createElement('div');
     d.textContent = String(s ?? '');
@@ -1321,6 +1401,350 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         '<span class="model-cost">¥' + (m.cost || 0).toFixed(2) + '</span>' +
         '</div>';
     }).join('');
+  }
+
+  // ====== 图表绘制 (Canvas 2D, 零依赖) v3 ======
+  // 配色: 橙=费用 #f97316, 绿系: #22c55e/#16a34a/#15803d
+  // 浮窗配色与今日面板统一: 蓝=输入, 绿=命中, 紫=输出
+
+  var H = 250;
+  var PAD = { top: 20, right: 12, bottom: 36, left: 44 };
+  var Y_STEPS = 6;
+
+  // 坐标轴颜色 — 根据 VS Code 主题自适应（浅色主题用深色文字）
+  function getAxisColors() {
+    var isLight = document.body.classList.contains('vscode-light');
+    return {
+      axis: isLight ? 'rgba(0,0,0,0.5)' : 'rgba(255,255,255,0.4)',
+      grid: isLight ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.06)'
+    };
+  }
+
+  // 获取当前月份数据
+  function getRecentData(allDays) {
+    if (!allDays || !allDays.length) return [];
+    var sorted = allDays.slice().sort(function(a, b) { return a.date.localeCompare(b.date); });
+    return sorted.slice(-7);
+  }
+
+  // DPI 适配 + 坐标统一 — 先复位再读 clientWidth，然后锁定确保坐标一致
+  function setupCanvas(canvas, h) {
+    var dpr = window.devicePixelRatio || 1;
+    // 先清掉旧宽度让 canvas 撑满父容器，再读实际可用宽度
+    canvas.style.width = '';
+    var w = canvas.clientWidth || 280;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    var ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    return { ctx: ctx, w: w };
+  }
+
+  // X 轴标签: m/d 格式
+  function xLabel(dateStr) {
+    var parts = dateStr.split('-');
+    return parseInt(parts[1], 10) + '/' + parseInt(parts[2], 10);
+  }
+
+  // ====== Tooltip 系统 (position:fixed 挂 body, 边界检测防裁剪) ======
+  var _tooltipEl = null;
+  function showTooltip(canvas, evt, textLines) {
+    if (!_tooltipEl) {
+      _tooltipEl = document.createElement('div');
+      _tooltipEl.style.cssText = 'position:fixed;pointer-events:none;z-index:9999;' +
+        'background:rgba(30,30,30,0.94);color:#fff;font-size:11px;font-family:sans-serif;' +
+        'padding:6px 10px;border-radius:6px;line-height:1.5;white-space:nowrap;' +
+        'box-shadow:0 2px 10px rgba(0,0,0,0.4);';
+      document.body.appendChild(_tooltipEl);
+    }
+    _tooltipEl.innerHTML = textLines.join('<br>');
+
+    // viewport 坐标
+    var rect = canvas.getBoundingClientRect();
+    var left = rect.left + evt.offsetX + 10;
+    var top = rect.top + evt.offsetY - 30;
+
+    // 右侧溢出 → 翻到鼠标左侧
+    var tw = _tooltipEl.offsetWidth || 150;
+    if (left + tw > window.innerWidth - 8) {
+      left = rect.left + evt.offsetX - tw - 10;
+    }
+    // 底部溢出 → 翻到鼠标上方
+    var th = _tooltipEl.offsetHeight || 60;
+    if (top + th > window.innerHeight - 8) {
+      top = rect.top + evt.offsetY - th - 10;
+    }
+    // 不超出视口
+    if (left < 4) left = 4;
+    if (top < 4) top = 4;
+
+    _tooltipEl.style.left = left + 'px';
+    _tooltipEl.style.top = top + 'px';
+    _tooltipEl.style.display = 'block';
+  }
+  function hideTooltip() {
+    if (_tooltipEl) _tooltipEl.style.display = 'none';
+  }
+
+  // 费用堆叠柱状图 — pro(深橙) + flash(浅橙), 渐变色 + 最高值标注
+  function drawBarChart(canvas, monthData) {
+    var ac = getAxisColors();
+    var r = setupCanvas(canvas, H);
+    var ctx = r.ctx, cw = r.w;
+    var pw = cw - PAD.left - PAD.right;
+    var ph = H - PAD.top - PAD.bottom;
+    ctx.clearRect(0, 0, cw, H);
+
+    // 每日期按模型拆分
+    var maxTotal = 0;
+    var dailyModels = [];
+    for (var i = 0; i < monthData.length; i++) {
+      var models = (monthData[i].modelBreakdown || []).filter(function(m) { return m.cost > 0; });
+      var proCost = 0, flashCost = 0;
+      for (var j = 0; j < models.length; j++) {
+        if (models[j].model.indexOf('flash') >= 0) flashCost += models[j].cost;
+        else proCost += models[j].cost;
+      }
+      var total = proCost + flashCost;
+      if (total > maxTotal) maxTotal = total;
+      dailyModels.push({ pro: proCost, flash: flashCost, total: total, models: models, date: monthData[i].date });
+    }
+    maxTotal = Math.max(0.01, maxTotal);
+    var niceMax = Math.ceil(maxTotal * 1.15);
+    var barW = Math.max(5, pw / monthData.length * 0.7);
+    var gap = pw / monthData.length;
+
+    // Y 轴
+    ctx.strokeStyle = ac.grid; ctx.lineWidth = 0.5;
+    ctx.fillStyle = ac.axis; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
+    for (var i = 0; i <= Y_STEPS; i++) {
+      var y = PAD.top + (ph / Y_STEPS) * i;
+      ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(cw - PAD.right, y); ctx.stroke();
+      ctx.fillText('¥' + (niceMax - (niceMax / Y_STEPS) * i).toFixed(0), PAD.left - 6, y + 3);
+    }
+
+    var proColor = '#ea580c', flashColor = '#fbbf24';
+    var step = Math.max(1, Math.floor(monthData.length / 8));
+    ctx.textAlign = 'center';
+    canvas._bars = [];
+    var maxBarIdx = -1, maxBarTotal = 0;
+
+    for (var i = 0; i < dailyModels.length; i++) {
+      var dm = dailyModels[i];
+      var x = PAD.left + gap * i + (gap - barW) / 2;
+      var yBase = PAD.top + ph;
+
+      // pro(底) — 渐变，先画在底部
+      if (dm.pro > 0) {
+        var ph2 = (dm.pro / niceMax) * ph;
+        var py = yBase - ph2;
+        var pgrad = ctx.createLinearGradient(x, py, x, yBase);
+        pgrad.addColorStop(0, proColor); pgrad.addColorStop(1, proColor + '66');
+        ctx.fillStyle = pgrad;
+        ctx.fillRect(x, py, barW, ph2);
+        yBase -= ph2;
+      }
+      // flash(顶) — 渐变，堆在 pro 上面
+      if (dm.flash > 0) {
+        var fh = (dm.flash / niceMax) * ph;
+        var fy = yBase - fh;
+        var fgrad = ctx.createLinearGradient(x, fy, x, yBase);
+        fgrad.addColorStop(0, flashColor); fgrad.addColorStop(1, flashColor + '66');
+        ctx.fillStyle = fgrad;
+        ctx.fillRect(x, fy, barW, fh);
+      }
+
+      if (dm.total >= maxBarTotal) { maxBarTotal = dm.total; maxBarIdx = i; }
+
+      if (i % step === 0 || i === monthData.length - 1) {
+        ctx.fillStyle = ac.axis;
+        ctx.fillText(xLabel(dm.date), x + barW / 2, H - PAD.bottom + 14);
+      }
+
+      canvas._bars.push({
+        x: x, w: barW, date: dm.date, total: dm.total, models: dm.models,
+        pro: dm.pro, flash: dm.flash
+      });
+    }
+
+    // 最高费用标注
+    if (maxBarIdx >= 0 && dailyModels[maxBarIdx].total > 0) {
+      var mb = canvas._bars[maxBarIdx];
+      ctx.fillStyle = '#f97316'; ctx.font = 'bold 10px "SF Mono", monospace'; ctx.textAlign = 'center';
+      ctx.fillText('¥' + mb.total.toFixed(2), mb.x + mb.w / 2, PAD.top + ph - (mb.total / niceMax) * ph - 6);
+    }
+
+    // 图例
+    ctx.font = '10px sans-serif';
+    ctx.fillStyle = proColor; ctx.fillRect(PAD.left, H - 14, 8, 8);
+    ctx.fillStyle = ac.axis; ctx.textAlign = 'left';
+    ctx.fillText('v4-pro', PAD.left + 12, H - 6);
+    var lw = ctx.measureText('v4-pro').width + 24;
+    ctx.fillStyle = flashColor; ctx.fillRect(PAD.left + lw, H - 14, 8, 8);
+    ctx.fillStyle = ac.axis;
+    ctx.fillText('v4-flash', PAD.left + lw + 12, H - 6);
+
+    // Tooltip
+    canvas.onmousemove = function(evt) {
+      var mx = evt.offsetX, my = evt.offsetY;
+      for (var i = 0; i < canvas._bars.length; i++) {
+        var b = canvas._bars[i];
+        if (mx >= b.x && mx <= b.x + b.w && my >= PAD.top && my <= PAD.top + ph) {
+          var lines = [b.date, '总费用: ¥' + b.total.toFixed(4)];
+          for (var j = 0; j < b.models.length; j++) {
+            var m = b.models[j];
+            lines.push((m.model || '').replace('deepseek-', '') + ': ¥' + m.cost.toFixed(4));
+          }
+          showTooltip(canvas, evt, lines);
+          return;
+        }
+      }
+      hideTooltip();
+    };
+    canvas.onmouseleave = hideTooltip;
+  }
+
+  // 堆叠柱状图 — Token 分布: 命中(蓝) + 未命中(紫) + 输出(橙)
+  function drawStackedBarChart(canvas, monthData) {
+    var ac = getAxisColors();
+    var r = setupCanvas(canvas, H);
+    var ctx = r.ctx, cw = r.w;
+    var pw = cw - PAD.left - PAD.right;
+    var ph = H - PAD.top - PAD.bottom;
+    ctx.clearRect(0, 0, cw, H);
+
+    var maxTotal = 0;
+    for (var i = 0; i < monthData.length; i++) {
+      var t = (monthData[i].input || 0) + (monthData[i].cacheRead || 0) + (monthData[i].output || 0);
+      if (t > maxTotal) maxTotal = t;
+    }
+    maxTotal = Math.max(1, maxTotal);
+    var niceMax = Math.ceil(maxTotal * 1.15);
+    // Y 轴单位自适应
+    var yUnit = '', yDiv = 1;
+    if (niceMax >= 1e6) { yUnit = 'M'; yDiv = 1e6; }
+    else if (niceMax >= 1e3) { yUnit = 'K'; yDiv = 1e3; }
+    var barW = Math.max(4, pw / monthData.length * 0.75);
+    var gap = pw / monthData.length;
+
+    // Y 轴
+    ctx.strokeStyle = ac.grid; ctx.lineWidth = 0.5;
+    ctx.fillStyle = ac.axis; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
+    for (var i = 0; i <= Y_STEPS; i++) {
+      var y = PAD.top + (ph / Y_STEPS) * i;
+      ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(cw - PAD.right, y); ctx.stroke();
+      var yv = niceMax - (niceMax / Y_STEPS) * i;
+      ctx.fillText(yDiv > 1 ? (yv / yDiv).toFixed(1) : formatNum(yv), PAD.left - 6, y + 3);
+    }
+
+    // 更新标题加上单位
+    var tt = document.getElementById('token-chart-title');
+    if (tt) tt.textContent = '每日 Token 分布' + (yUnit ? ' (' + yUnit + ')' : '');
+
+    // 栈序: 底=命中缓存(蓝) → 中=未命中(紫) → 顶=输出(橙), 与今日面板dot统一
+    var colors = ['#3b82f6', '#a78bfa', '#f97316'];
+    var keys = ['cacheRead', 'input', 'output'];
+    var labels = ['命中缓存', '未命中', '输出'];
+    var step = Math.max(1, Math.floor(monthData.length / 10));
+
+    canvas._bars = [];
+    for (var i = 0; i < monthData.length; i++) {
+      var x = PAD.left + gap * i + (gap - barW) / 2;
+      var yBase = PAD.top + ph;
+      var total = 0;
+      var segs = [];
+
+      for (var s = 0; s < keys.length; s++) {
+        var v = monthData[i][keys[s]] || 0;
+        if (v === 0) continue;
+        var segH = (v / niceMax) * ph;
+
+        var segTop = yBase - segH;
+        var segGrad = ctx.createLinearGradient(x, segTop, x, yBase);
+        segGrad.addColorStop(0, colors[s]); segGrad.addColorStop(1, colors[s] + '66');
+        ctx.fillStyle = segGrad;
+        ctx.fillRect(x, segTop, barW, segH);
+
+        segs.push({ v: v, h: segH, color: colors[s], label: labels[s] });
+        total += v;
+        yBase -= segH;
+      }
+
+      // X 轴标签
+      if (i % step === 0 || i === monthData.length - 1) {
+        ctx.fillStyle = ac.axis; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText(xLabel(monthData[i].date), x + barW / 2, H - PAD.bottom + 14);
+      }
+
+      canvas._bars.push({
+        x: x, w: barW, segs: segs, date: monthData[i].date, total: total,
+        input: monthData[i].input || 0, cacheRead: monthData[i].cacheRead || 0, output: monthData[i].output || 0
+      });
+    }
+
+    // 图例
+    var lgColors = ['#3b82f6', '#a78bfa', '#f97316'];
+    var lgLabels = ['命中缓存', '未命中', '输出'];
+    var lx = PAD.left;
+    ctx.font = '10px sans-serif';
+    for (var i = 0; i < lgLabels.length; i++) {
+      ctx.fillStyle = lgColors[i]; ctx.fillRect(lx, H - 14, 8, 8);
+      ctx.fillStyle = ac.axis; ctx.textAlign = 'left';
+      ctx.fillText(lgLabels[i], lx + 12, H - 6);
+      lx += ctx.measureText(lgLabels[i]).width + 20;
+    }
+
+    // Tooltip
+    canvas.onmousemove = function(evt) {
+      var mx = evt.offsetX, my = evt.offsetY;
+      for (var i = 0; i < canvas._bars.length; i++) {
+        var b = canvas._bars[i];
+        if (mx >= b.x && mx <= b.x + b.w && my >= PAD.top && my <= PAD.top + ph) {
+          var denom = (b.input || 0) + (b.cacheRead || 0);
+          var hr = denom > 0 ? ((b.cacheRead || 0) / denom * 100).toFixed(1) : '0';
+          var lines = [
+            b.date,
+            '总 Token: ' + formatNum(b.total),
+            '<span style="color:#3b82f6">●</span> 命中缓存: ' + formatNum(b.cacheRead || 0),
+            '<span style="color:#a78bfa">●</span> 未命中: ' + formatNum(b.input || 0),
+            '<span style="color:#f97316">●</span> 输出: ' + formatNum(b.output || 0),
+            '命中率: ' + hr + '%'
+          ];
+          showTooltip(canvas, evt, lines);
+          return;
+        }
+      }
+      hideTooltip();
+    };
+    canvas.onmouseleave = hideTooltip;
+  }
+
+  // 更新图表面板
+  function updateChartsPanel(allDays) {
+    var monthData = getRecentData(allDays);
+    if (!monthData.length) {
+      document.getElementById('panel-charts').innerHTML =
+        '<div class="loading" style="padding:40px;text-align:center;color:var(--text-muted)">本月暂无数据</div>';
+      return;
+    }
+
+    var costCanvas = document.getElementById('chart-cost');
+    var tokCanvas = document.getElementById('chart-tokens');
+
+    if (costCanvas) drawBarChart(costCanvas, monthData);
+    if (tokCanvas) drawStackedBarChart(tokCanvas, monthData);
+  }
+
+  // 导出图表报告
+  function exportChart() {
+    vscode.postMessage({ command: 'exportChart' });
+  }
+
+  // 手动刷新图表（适配面板宽度）
+  function refreshCharts() {
+    updateChartsPanel(_lastAllDays);
   }
 
 </script>

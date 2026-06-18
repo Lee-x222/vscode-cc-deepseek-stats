@@ -889,6 +889,27 @@ export function buildQuickMessage(workspaceRoot: string, recentDays = 7): StatsM
 
   const overThreshold = (balance > 0 && balance < balanceThreshold);
 
+  // 最近 N 条消息的缓存命中率（聚合多条避免单条偏差）
+  let lastTurnHitRate: number | undefined;
+  try {
+    const projectDir = path.join(home, '.claude', 'projects',
+      workspaceRoot.replace(/[^a-zA-Z0-9]/g, '-'));
+    const recentFiles = collectRecentJsonlFiles(projectDir, 3);
+    const allMessages: { input: number; cacheRead: number; output: number; ts: string }[] = [];
+    for (const file of recentFiles) {
+      for (const cl of parseOneFile(file)) {
+        allMessages.push(cl);
+      }
+    }
+    allMessages.sort((a, b) => b.ts.localeCompare(a.ts)); // 最新在前
+    const recent = allMessages.slice(0, 5);
+    const totalInput = recent.reduce((s, m) => s + (m.input || 0), 0);
+    const totalCacheRead = recent.reduce((s, m) => s + (m.cacheRead || 0), 0);
+    if (totalInput + totalCacheRead > 0) {
+      lastTurnHitRate = (totalCacheRead / (totalInput + totalCacheRead)) * 100;
+    }
+  } catch { /* 静默 */ }
+
   return {
     type: 'update',
     status: hasData ? 'ok' : 'loading',
@@ -915,6 +936,7 @@ export function buildQuickMessage(workspaceRoot: string, recentDays = 7): StatsM
     overThreshold,
     authConfigured,
     balanceThreshold,
+    lastTurnHitRate,
   };
 }
 

@@ -88,4 +88,6 @@ export interface StatsMessage {
   projectSlug: string;
   /** 可用技能列表 */
   skills: { name: string; description: string }[];
+  /** 最近一轮的缓存命中率（0-100），借鉴 Reasonix turn hit */
+  lastTurnHitRate?: number;
 }
