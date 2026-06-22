@@ -1541,7 +1541,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         var ph2 = (dm.pro / niceMax) * ph;
         var py = yBase - ph2;
         var pgrad = ctx.createLinearGradient(x, py, x, yBase);
-        pgrad.addColorStop(0, proColor); pgrad.addColorStop(1, proColor + '66');
+        pgrad.addColorStop(0, '#f97316'); pgrad.addColorStop(1, proColor);
         ctx.fillStyle = pgrad;
         ctx.fillRect(x, py, barW, ph2);
         yBase -= ph2;
@@ -1551,7 +1551,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         var fh = (dm.flash / niceMax) * ph;
         var fy = yBase - fh;
         var fgrad = ctx.createLinearGradient(x, fy, x, yBase);
-        fgrad.addColorStop(0, flashColor); fgrad.addColorStop(1, flashColor + '66');
+        fgrad.addColorStop(0, '#fcd34d'); fgrad.addColorStop(1, flashColor);
         ctx.fillStyle = fgrad;
         ctx.fillRect(x, fy, barW, fh);
       }
@@ -1645,6 +1645,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     // 栈序: 底=命中缓存(蓝) → 中=未命中(紫) → 顶=输出(橙), 与今日面板dot统一
     var colors = ['#3b82f6', '#a78bfa', '#f97316'];
+    var lightColors = ['#60a5fa', '#c4b5fd', '#fb923c'];
     var keys = ['cacheRead', 'input', 'output'];
     var labels = ['命中缓存', '未命中', '输出'];
     var step = Math.max(1, Math.floor(monthData.length / 10));
@@ -1663,7 +1664,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
         var segTop = yBase - segH;
         var segGrad = ctx.createLinearGradient(x, segTop, x, yBase);
-        segGrad.addColorStop(0, colors[s]); segGrad.addColorStop(1, colors[s] + '66');
+        segGrad.addColorStop(0, lightColors[s]); segGrad.addColorStop(1, colors[s]);
         ctx.fillStyle = segGrad;
         ctx.fillRect(x, segTop, barW, segH);
 

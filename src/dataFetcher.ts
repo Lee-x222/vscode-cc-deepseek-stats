@@ -553,6 +553,7 @@ export function getMcpServers(workspaceRoot: string): McpServerInfo[] {
 
   // 检查多个配置来源
   const sources = [
+    path.join(home, '.claude.json'),       // claude mcp add --scope user 写入这里
     path.join(home, '.claude', 'mcp.json'),
     path.join(home, '.claude', 'settings.json'),
     path.join(home, '.claude', 'settings.local.json'),
@@ -772,7 +773,7 @@ async function enrichMcpHealth(workspaceRoot: string, servers: McpServerInfo[]):
   const processResults = await checkStdioProcesses(uncached);
 
   const sseChecks = uncached
-    .filter(s => (s.type === 'sse' || (!s.type && s.url)) && s.url)
+    .filter(s => (s.type === 'sse' || s.type === 'http' || (!s.type && s.url)) && s.url)
     .map(async (srv) => {
       const status = await checkSseHealth(srv.url!);
       srv.status = status;
@@ -785,7 +786,7 @@ async function enrichMcpHealth(workspaceRoot: string, servers: McpServerInfo[]):
   const allStdioOffline = stdioResults.length > 0 && stdioResults.every(v => !v);
 
   for (const srv of uncached) {
-    if (srv.type === 'sse' || (!srv.type && srv.url)) continue;
+    if (srv.type === 'sse' || srv.type === 'http' || (!srv.type && srv.url)) continue;
     const healthKey = `${workspaceRoot}::${srv.name}`;
     if (processResults.has(srv.name)) {
       const online = processResults.get(srv.name);

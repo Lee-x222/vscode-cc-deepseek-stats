@@ -50,7 +50,9 @@ export function activate(context: vscode.ExtensionContext) {
       } catch {
         await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(html));
       }
-      vscode.window.showInformationMessage(`已导出图表报告到 ${uri.fsPath}`);
+      vscode.window.showInformationMessage(`已导出图表报告到 ${uri.fsPath}`, '打开报告').then(choice => {
+        if (choice === '打开报告') { vscode.env.openExternal(uri); }
+      });
     })
   );
 
@@ -301,7 +303,7 @@ function drawBars(canvas, entries) {
     if (daily[i].pro > 0) {
       var ph2 = daily[i].pro / nm * ph, py = yb - ph2;
       var g = ctx.createLinearGradient(x, py, x, yb);
-      g.addColorStop(0, proColor); g.addColorStop(1, proColor + '66');
+      g.addColorStop(0, '#f97316'); g.addColorStop(1, proColor);
       ctx.fillStyle = g; ctx.fillRect(x, py, bw, ph2);
       yb -= ph2;
     }
@@ -309,7 +311,7 @@ function drawBars(canvas, entries) {
     if (daily[i].flash > 0) {
       var fh = daily[i].flash / nm * ph, fy = yb - fh;
       var fg = ctx.createLinearGradient(x, fy, x, yb);
-      fg.addColorStop(0, flashColor); fg.addColorStop(1, flashColor + '66');
+      fg.addColorStop(0, '#fcd34d'); fg.addColorStop(1, flashColor);
       ctx.fillStyle = fg; ctx.fillRect(x, fy, bw, fh);
     }
 
@@ -378,7 +380,7 @@ function drawStacked(canvas, entries) {
   if (ct) ct.textContent = ' 每日 Token 分布' + (yUnit ? ' (' + yUnit + ')' : '');
   ctx.textAlign = 'center';
 
-  var colors = ['#3b82f6', '#a78bfa', '#f97316'], keys = ['cacheRead', 'input', 'output'];
+  var colors = ['#3b82f6', '#a78bfa', '#f97316'], lightColors = ['#60a5fa', '#c4b5fd', '#fb923c'], keys = ['cacheRead', 'input', 'output'];
   var bw = Math.max(3, pw / entries.length * 0.7), gap = pw / entries.length;
   var step = Math.max(1, Math.floor(entries.length / 15));
   canvas._bars = [];
@@ -390,7 +392,7 @@ function drawStacked(canvas, entries) {
       if (!v) continue;
       var sh = v / nm * ph, segTop = yb - sh;
       var grad = ctx.createLinearGradient(x, segTop, x, yb);
-      grad.addColorStop(0, colors[s]); grad.addColorStop(1, colors[s] + '66');
+      grad.addColorStop(0, lightColors[s]); grad.addColorStop(1, colors[s]);
       ctx.fillStyle = grad;
       ctx.fillRect(x, segTop, bw, sh);
       yb -= sh;

@@ -41,7 +41,7 @@ export type McpServerStatus = 'online' | 'offline' | 'unknown';
 /** MCP 服务器信息（含连通性状态） */
 export interface McpServerInfo {
   name: string;
-  type?: string;     // 'sse' | 'stdio'
+  type?: string;     // 'sse' | 'stdio' | 'http'
   url?: string;      // SSE 服务器端点
   command?: string;  // stdio 可执行文件
   args?: string[];   // stdio 命令行参数（用于进程检测）
