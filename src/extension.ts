@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { SidebarProvider } from './sidebarProvider';
-import { buildStatsMessage } from './dataFetcher';
+import { buildStatsMessage, fetchDeepSeekMonth } from './dataFetcher';
 
 let _provider: SidebarProvider | undefined;
 
@@ -53,6 +53,26 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.window.showInformationMessage(`已导出图表报告到 ${uri.fsPath}`, '打开报告').then(choice => {
         if (choice === '打开报告') { vscode.env.openExternal(uri); }
       });
+    })
+  );
+
+  // 拉取指定月份 DeepSeek 平台数据命令
+  context.subscriptions.push(
+    vscode.commands.registerCommand('vscode-cc-deepseek-stats.fetchMonth', async () => {
+      const input = await vscode.window.showInputBox({
+        prompt: '输入要拉取的月份 (YYYY-MM)',
+        placeHolder: '2026-05',
+        validateInput: (v) => /^\d{4}-\d{2}$/.test(v) ? undefined : '格式: YYYY-MM',
+      });
+      if (!input) return;
+      const home = process.env.HOME || process.env.USERPROFILE || '';
+      const result = await fetchDeepSeekMonth(home, input);
+      if (result) {
+        vscode.window.showInformationMessage(`已拉取 ${input} 平台数据: ¥${result.totalCost.toFixed(2)} (${Object.keys(result.models||{}).join(', ')})`);
+        _provider?.refresh();
+      } else {
+        vscode.window.showWarningMessage(`无法获取 ${input} 的平台数据，请检查认证信息和网络连接`);
+      }
     })
   );
 
@@ -204,6 +224,11 @@ function fmtTok(n) {
   return String(Math.floor(n));
 }
 
+function daysInMonth(prefix) {
+  var parts = prefix.split('-');
+  return new Date(parseInt(parts[0]), parseInt(parts[1]), 0).getDate();
+}
+
 function setupCanvas(canvas, w, h) {
   var dpr = window.devicePixelRatio || 1;
   canvas.width = w * dpr;
@@ -237,25 +262,45 @@ function showTip(evt, lines) {
 }
 function hideTip() { if (_tip) _tip.style.display = 'none'; }
 
-// 月份切换
+// 月份切换 — 构建完整月份天数数组，无数据天填0，铺满X轴
 function switchMonth(prefix) {
   CUR = prefix;
-  var data = ALL_DATA.filter(function(d) { return d.date.indexOf(prefix) === 0; });
-  // 更新 KPI
-  var tc = data.reduce(function(s,d){return s+d.cost;}, 0);
-  var tt = data.reduce(function(s,d){return s+d.totalTokens;}, 0);
+  var totalDays = daysInMonth(prefix);
+
+  // 映射已有数据
+  var existingMap = {};
+  ALL_DATA.forEach(function(d) {
+    if (d.date.indexOf(prefix) === 0) existingMap[d.date] = d;
+  });
+
+  // 构建完整月份数组（1..totalDays）
+  var fullMonthData = [];
+  for (var d = 1; d <= totalDays; d++) {
+    var dateStr = prefix + '-' + (d < 10 ? '0' + d : '' + d);
+    var entry = existingMap[dateStr];
+    if (entry) {
+      fullMonthData.push(entry);
+    } else {
+      fullMonthData.push({ date: dateStr, cost: 0, input: 0, output: 0, cacheRead: 0, totalTokens: 0, models: [], modelBreakdown: [] });
+    }
+  }
+
+  // KPI 统计 — 仅用真实数据
+  var realData = fullMonthData.filter(function(d) { return d.totalTokens > 0; });
+  var tc = realData.reduce(function(s,d){return s+d.cost;}, 0);
+  var tt = realData.reduce(function(s,d){return s+d.totalTokens;}, 0);
   var hs = 0, hc = 0;
-  data.forEach(function(d) {
+  realData.forEach(function(d) {
     var denom = (d.cacheRead||0)+(d.input||0);
     if (denom > 0) { hs += (d.cacheRead||0)/denom*100; hc++; }
   });
   document.getElementById('kpi-cost').textContent = '¥' + tc.toFixed(2);
   document.getElementById('kpi-tokens').textContent = fmtTok(tt);
   document.getElementById('kpi-hit').innerHTML = (hc>0?(hs/hc).toFixed(1):'0') + '<span class="kpi-unit">%</span>';
-  document.getElementById('kpi-days').textContent = data.length;
-  // 重绘
-  drawBars(document.getElementById('c1'), data);
-  drawStacked(document.getElementById('c2'), data);
+  document.getElementById('kpi-days').textContent = realData.length;
+  // 重绘 — 用完整月份数组铺满X轴
+  drawBars(document.getElementById('c1'), fullMonthData);
+  drawStacked(document.getElementById('c2'), fullMonthData);
 }
 
 // 费用堆叠柱状图 — pro(底#ea580c) + flash(顶#fbbf24), 渐变色 + 最高值 + 浮窗
@@ -279,7 +324,8 @@ function drawBars(canvas, entries) {
   }
   maxTotal = Math.max(0.01, maxTotal);
   var nm = Math.ceil(maxTotal * 1.15);
-  var bw = Math.max(5, pw / entries.length * 0.7), gap = pw / entries.length;
+  var MAX_BW = 50;
+  var bw = Math.min(MAX_BW, Math.max(5, pw / entries.length * 0.7)), gap = pw / entries.length;
 
   // Y 轴
   ctx.strokeStyle = '#eee'; ctx.lineWidth = 0.5;
@@ -381,7 +427,8 @@ function drawStacked(canvas, entries) {
   ctx.textAlign = 'center';
 
   var colors = ['#3b82f6', '#a78bfa', '#f97316'], lightColors = ['#60a5fa', '#c4b5fd', '#fb923c'], keys = ['cacheRead', 'input', 'output'];
-  var bw = Math.max(3, pw / entries.length * 0.7), gap = pw / entries.length;
+  var MAX_BW = 50;
+  var bw = Math.min(MAX_BW, Math.max(3, pw / entries.length * 0.7)), gap = pw / entries.length;
   var step = Math.max(1, Math.floor(entries.length / 15));
   canvas._bars = [];
 
@@ -436,12 +483,24 @@ function drawStacked(canvas, entries) {
   canvas.onmouseleave = hideTip;
 }
 
-// 初始渲染
+// 初始渲染 — 构建完整月份天数数组
 (function() {
-  var data = ALL_DATA.filter(function(d) { return d.date.indexOf(CUR) === 0; });
-  if (!data.length) return;
-  drawBars(document.getElementById('c1'), data);
-  drawStacked(document.getElementById('c2'), data);
+  var totalDays = daysInMonth(CUR);
+  var existingMap = {};
+  ALL_DATA.forEach(function(d) { if (d.date.indexOf(CUR) === 0) existingMap[d.date] = d; });
+  var fullMonthData = [];
+  for (var d = 1; d <= totalDays; d++) {
+    var dateStr = CUR + '-' + (d < 10 ? '0' + d : '' + d);
+    var entry = existingMap[dateStr];
+    if (entry) {
+      fullMonthData.push(entry);
+    } else {
+      fullMonthData.push({ date: dateStr, cost: 0, input: 0, output: 0, cacheRead: 0, totalTokens: 0, models: [], modelBreakdown: [] });
+    }
+  }
+  if (!fullMonthData.length) return;
+  drawBars(document.getElementById('c1'), fullMonthData);
+  drawStacked(document.getElementById('c2'), fullMonthData);
 })();
 </script>
 </body></html>`;

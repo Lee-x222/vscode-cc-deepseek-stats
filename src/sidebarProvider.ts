@@ -334,6 +334,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       background-clip: text;
       margin-top: 2px;
     }
+
     .total-label {
       font-size: 11px;
       color: var(--text-muted);
@@ -1513,7 +1514,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
     maxTotal = Math.max(0.01, maxTotal);
     var niceMax = Math.ceil(maxTotal * 1.15);
-    var barW = Math.max(5, pw / monthData.length * 0.7);
+    var MAX_BW = 40;
+    var barW = Math.min(MAX_BW, Math.max(5, pw / monthData.length * 0.7));
     var gap = pw / monthData.length;
 
     // Y 轴
@@ -1626,7 +1628,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     var yUnit = '', yDiv = 1;
     if (niceMax >= 1e6) { yUnit = 'M'; yDiv = 1e6; }
     else if (niceMax >= 1e3) { yUnit = 'K'; yDiv = 1e3; }
-    var barW = Math.max(4, pw / monthData.length * 0.75);
+    var MAX_BW = 40;
+    var barW = Math.min(MAX_BW, Math.max(4, pw / monthData.length * 0.75));
     var gap = pw / monthData.length;
 
     // Y 轴

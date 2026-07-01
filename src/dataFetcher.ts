@@ -311,13 +311,15 @@ let _fetching = false;
 const LIVE_FETCH_INTERVAL = 2 * 60 * 1000;
 
 /** DeepSeek 平台数据：优先调 fetch_deepseek.js 实时拉（限频+互斥锁），失败降级读缓存 */
-async function fetchDeepSeekPlatformUsage(home: string): Promise<DsUsageCache | null> {
+async function fetchDeepSeekPlatformUsage(home: string, monthArg?: string): Promise<DsUsageCache | null> {
   const scriptPath = path.resolve(__dirname, '..', 'fetch_deepseek.js');
   if (Date.now() - _lastLiveFetch > LIVE_FETCH_INTERVAL && !_fetching) {
     _fetching = true;
     try {
       _lastLiveFetch = Date.now();
-      const { stdout } = await execFileAsync('node', [scriptPath], {
+      const execArgs: string[] = [scriptPath];
+      if (monthArg) { execArgs.push('--month', monthArg); }
+      const { stdout } = await execFileAsync('node', execArgs, {
         encoding: 'utf-8', timeout: 15_000, windowsHide: true,
       });
       const parsed = JSON.parse(stdout.trim());
@@ -336,6 +338,23 @@ async function fetchDeepSeekPlatformUsage(home: string): Promise<DsUsageCache | 
     // 修复：无效日期视为缓存过期
     if (isNaN(updatedTs) || Date.now() - updatedTs > 2 * 60 * 60 * 1000) return null;
     return data;
+  } catch { return null; }
+}
+
+/** 拉取指定月份 DeepSeek 平台数据（绕过限频，供命令调用） */
+export async function fetchDeepSeekMonth(home: string, month: string): Promise<DsUsageCache | null> {
+  const scriptPath = path.resolve(__dirname, '..', 'fetch_deepseek.js');
+  try {
+    const { stdout } = await execFileAsync('node', [scriptPath, '--month', month], {
+      encoding: 'utf-8', timeout: 15_000, windowsHide: true,
+    });
+    const parsed = JSON.parse(stdout.trim());
+    if (parsed.ok && parsed.data) return parsed.data as DsUsageCache;
+  } catch { /* 实时拉取失败，尝试读归档缓存 */ }
+  try {
+    const archivePath = path.join(home, '.claude', `deepseek_usage_${month}.json`);
+    const raw = fs.readFileSync(archivePath, 'utf-8');
+    return JSON.parse(raw);
   } catch { return null; }
 }
 
@@ -1160,8 +1179,8 @@ export function startAutoRefresh(
     if (cancelled) return;
     try {
       if (isFirstTick) {
-        // 首屏快速消息（同步，<200ms）
-        const quickMsg = buildQuickMessage(workspaceRoot);
+        // 首屏快速消息（全量扫描，确保月度汇总准确）
+        const quickMsg = buildQuickMessage(workspaceRoot, 0);
         if (!cancelled) {
           callback(quickMsg);
         }

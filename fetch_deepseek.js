@@ -161,10 +161,22 @@ function parseUsage(usageArr, isCost) {
 
 (async () => {
   try {
+    // 解析 --month YYYY-MM 参数
+    let targetMonth = null, targetYear = null;
+    const args = process.argv.slice(2);
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '--month' && args[i + 1]) {
+        const parts = args[i + 1].split('-');
+        if (parts.length === 2) { targetYear = parseInt(parts[0]); targetMonth = parseInt(parts[1]); }
+        break;
+      }
+    }
+
     const now = new Date();
-    const month = now.getUTCMonth() + 1;
-    const year = now.getUTCFullYear();
+    const month = targetMonth !== null ? targetMonth : (now.getUTCMonth() + 1);
+    const year = targetYear !== null ? targetYear : now.getUTCFullYear();
     const monthStr = year + '-' + String(month).padStart(2, '0');
+    const isCurrentMonth = (targetMonth === null);
     const todayUTC = now.toISOString().slice(0, 10);
 
     const [costData, amtData, balanceFromApi, userSummary] = await Promise.all([
@@ -271,8 +283,24 @@ function parseUsage(usageArr, isCost) {
       balance: Math.round(balance * 100) / 100
     };
 
-    // 写缓存
-    fs.writeFileSync(CACHE_PATH, JSON.stringify(result, null, 2));
+    // 月份轮转：仅当前月时归档旧缓存
+    if (isCurrentMonth) {
+      try {
+        const oldRaw = fs.readFileSync(CACHE_PATH, 'utf-8');
+        const old = JSON.parse(oldRaw);
+        if (old.month && old.month !== result.month) {
+          const archivePath = path.join(HOME, '.claude', `deepseek_usage_${old.month}.json`);
+          fs.renameSync(CACHE_PATH, archivePath);
+        }
+      } catch {}
+    }
+    // 写缓存：当前月→主缓存，历史月→归档文件
+    if (isCurrentMonth) {
+      fs.writeFileSync(CACHE_PATH, JSON.stringify(result, null, 2));
+    } else {
+      const archivePath = path.join(HOME, '.claude', `deepseek_usage_${result.month}.json`);
+      fs.writeFileSync(archivePath, JSON.stringify(result, null, 2));
+    }
 
     // 输出到 stdout
     console.log(JSON.stringify({ ok: true, data: result }));
